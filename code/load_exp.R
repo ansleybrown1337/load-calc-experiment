@@ -42,7 +42,8 @@ process_flow_data <- function(flow_data) {
       datetime = as.POSIXct(datetime, format="%m/%d/%Y %H:%M", tz="UTC"),
       date_only = as.Date(datetime),  # Extract just the date part
       min_time = as.POSIXct(paste(date_only, min_time), format="%Y-%m-%d %I:%M:%S %p", tz="UTC"),
-      max_time = as.POSIXct(paste(date_only, max_time), format="%Y-%m-%d %I:%M:%S %p", tz="UTC")
+      max_time = as.POSIXct(paste(date_only, max_time), format="%Y-%m-%d %I:%M:%S %p", tz="UTC"),
+      volume_L = volume_gal * 3.78541  # Convert volume to liters
     ) %>%
     select(-date_only) # Remove intermediate column
 }
@@ -62,17 +63,43 @@ avg_flow_rates <- function(flow_data, user_interval = 1) {
       max_flow_gpm = max(max_flow_gpm, na.rm = TRUE),
       avg_flow_gpm = mean(avg_flow_gpm, na.rm = TRUE),
       volume_gal = sum(volume_gal, na.rm = TRUE),
+      volume_L = sum(volume_gal, na.rm = TRUE),
       sample_event = sum(sample_event, na.rm = TRUE),
       .groups = "drop"
     )
 }
 
 # Obtain Average concentration of analytes
-compute_avg_analyte_results <- function(wq_data) {
+compute_analyte_summary <- function(wq_data) {
   wq_data %>%
     group_by(analyte) %>%
-    summarise(avg_result = mean(result, na.rm = TRUE), .groups = "drop") %>%
-    { setNames(.$avg_result, .$analyte) }  # Convert tibble to named vector
+    summarise(
+      avg_result = mean(result, na.rm = TRUE),
+      sd_result = sd(result, na.rm = TRUE),  # Compute standard deviation
+      .groups = "drop"
+    ) %>%
+    split(.$analyte) %>%  # Create a list of lists, indexed by analyte names
+    lapply(function(df) list(avg = df$avg_result, sd = df$sd_result))
+}
+
+# Load method 1: using analyte mean and total flow volume
+load_method_1 <- function(analyte_obj, analyte_index, flow_data) {
+  # calculate load
+  load_mg <- analyte_obj[[analyte_index]]$avg * sum(flow_data$volume_L)
+  # calculate load upper and lower bounds with standard deviation
+  load_mg_upper <- (analyte_obj[[analyte_index]]$avg + analyte_obj[[analyte_index]]$sd) * sum(flow_data$volume_L)
+  load_mg_lower <- (analyte_obj[[analyte_index]]$avg - analyte_obj[[analyte_index]]$sd) * sum(flow_data$volume_L)
+  # convert everything to kg
+  load_kg <- load_mg / 1000 / 1000
+  load_kg_upper <- load_mg_upper / 1000 / 1000
+  load_kg_lower <- load_mg_lower / 1000 / 1000
+  # print out analyte chosen
+  print(avg_analyte_results[analyte_index])
+  # print load with upper and lower bounds
+  print(paste0("Load (kg): ", load_kg))
+  print(paste0("Load upper bound (kg): ", load_kg_upper))
+  print(paste0("Load lower bound (kg): ", load_kg_lower))
+  load_kg
 }
 
 ########### Execute functions ###########
@@ -98,9 +125,14 @@ flow <- flow %>%
 flow_aggregated <- avg_flow_rates(flow, user_interval = 4)
 
 ## Compute average analyte results
-avg_analyte_results <- compute_avg_analyte_results(wq)
-print(avg_analyte_results)
+analyte_summary <- compute_analyte_summary(wq)
+print(analyte_summary)
 
-## Load calc 1: mean concentration * total flow volume
+## Load calc 1: total P in kg
+load_P_m1 <- load_method_1(analyte_summary, 8, flow_aggregated)
 
-#TBD
+## Load calc 1: total N02 in kg
+load_N_m1 <- load_method_1(analyte_summary, 2, flow_aggregated)
+
+## Load calc 1: total TSS in kg
+load_TSS_m1 <- load_method_1(analyte_summary, 7, flow_aggregated)
