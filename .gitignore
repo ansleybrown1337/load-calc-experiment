@@ -1,3 +1,6 @@
+# AJ-specified private files
+/private-data
+
 # History files
 .Rhistory
 .Rapp.history
