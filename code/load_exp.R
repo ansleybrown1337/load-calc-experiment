@@ -4,7 +4,24 @@
 # Load required libraries
 library(dplyr)
 library(tidyr)
-library(ggplot2)
+
+# ============================ ANALYTE ABBREVIATION DICTIONARY ============================
+
+analyteAbbr.dict <- list(
+  "TKN"   = c("Nitrogen, Total Kjeldahl"),
+  "NO2_N" = c("Nitrogen, Nitrite  (As N)", "NITRITE AS N"),
+  "PO4_P" = c("Phosphorus, Total Orthophosphate (as P)", "ORTHOPHOSPHATE AS P"),
+  "TP"    = c("Phosphorus, Total (As P)", "TOTAL PHOSPHORUS"),
+  "TDS"   = c("Total Dissolved Solids (Residue, Filterable)"),
+  "NO3_N" = c("Nitrogen, Nitrate (As N)", "NITRATE AS N"),
+  "TSS"   = c("Suspended Solids (Residue, Non-Filterable)", "TSS"),
+  "Fe"    = c("Iron, Total"),
+  "Se"    = c("Selenium, Total", "SELENIUM"),
+  "pH"    = c("pH", "POTENTIAL HYDROGEN"),
+  "EC25"  = c("Specific Conductance", "ELECTRICAL CONDUCTIVITY")
+)
+
+
 
 # ============================ IMPORT DATA ============================
 
@@ -20,16 +37,23 @@ import_flow_data <- function(file_path) {
 
 # ============================ PROCESS DATA ============================
 
-## Process Water Quality Data
+## Process Water Quality Data (with analyte abbreviation mapping)
 process_wq_data <- function(wq_data) {
   wq_data %>%
     mutate(
       collected = as.POSIXct(collected, format="%m/%d/%Y %H:%M", tz="UTC"),
       received = as.POSIXct(received, format="%m/%d/%Y %H:%M", tz="UTC"),
-      treatment.name = as.character(treatment.name)
+      treatment.name = as.character(treatment.name),
+      analyte_abbr = vapply(analyte, function(a) {
+        match <- names(analyteAbbr.dict)[sapply(analyteAbbr.dict, function(x) a %in% x)]
+        if (length(match) == 0) NA else match
+      }, FUN.VALUE = character(1))  # Ensures correct vector length
     ) %>%
-    filter(treatment.name == "Outflow")
+    filter(treatment.name == "Outflow") %>%
+    filter(!is.na(analyte_abbr))  # Remove unmapped analytes
 }
+
+
 
 ## Process Flow Data
 process_flow_data <- function(flow_data) {
@@ -74,13 +98,13 @@ aggregate_flow_data <- function(flow_data, user_interval = 4) {
 
 compute_analyte_summary <- function(wq_data) {
   wq_data %>%
-    group_by(analyte) %>%
+    group_by(analyte_abbr) %>%
     summarise(
       avg_result = mean(result, na.rm = TRUE),
-      sd_result = sd(result, na.rm = TRUE),  # Standard deviation for uncertainty
+      sd_result = sd(result, na.rm = TRUE),
       .groups = "drop"
     ) %>%
-    split(.$analyte) %>%
+    split(.$analyte_abbr) %>%
     lapply(function(df) list(avg = df$avg_result, sd = df$sd_result))
 }
 
@@ -113,48 +137,73 @@ compute_load <- function(analyte_obj, analyte_name, flow_data) {
 compute_all_loads <- function(analyte_obj, flow_data) {
   analyte_names <- names(analyte_obj)
   loads <- lapply(analyte_names, function(analyte) compute_load(analyte_obj, analyte, flow_data))
-  bind_rows(loads)  # Combine into a single dataframe
+  bind_rows(loads)
 }
 
-# ============================ PLOTTING FUNCTION ============================
+# ============================ RUN LOAD ANALYSIS FUNCTION ============================
 
-## Create Faceted Bar Graph of Loads for Each Analyte
-# mostly placeholder; not working and not including treatment colors yet
-plot_analyte_loads <- function(load_data) {
-  ggplot(load_data, aes(x = analyte, y = load_kg, fill = analyte)) +
-    geom_bar(stat = "identity", width = 0.7) +
-    geom_errorbar(aes(ymin = load_lower_kg, ymax = load_upper_kg), width = 0.2, color = "black") +
-    labs(title = "Analyte Load Estimates", x = "Analyte", y = "Load (kg)") +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    facet_wrap(~analyte, scales = "free_y")  # Facet by analyte for clarity
+run_load_analysis <- function(wq_file, flow_file, start_date, end_date, user_interval = 4) {
+  
+  # ============================ IMPORT & PROCESS DATA ============================
+  
+  ## Import Data
+  wq_raw <- import_wq_data(wq_file)
+  flow_raw <- import_flow_data(flow_file)
+  
+  ## Process Data
+  wq <- process_wq_data(wq_raw)
+  flow <- process_flow_data(flow_raw)
+  
+  ## Filter Data to Date Range
+  start_date <- as.POSIXct(start_date, tz = "UTC")
+  end_date <- as.POSIXct(end_date, tz = "UTC")
+  
+  wq <- filter(wq, collected >= start_date & collected <= end_date)
+  flow <- filter(flow, datetime >= start_date & datetime <= end_date)
+  
+  ## Aggregate Flow Data
+  flow_aggregated <- aggregate_flow_data(flow, user_interval = user_interval)
+  flow_sum <- sum(flow_aggregated$volume_L)
+  
+  # ============================ ANALYTE PROCESSING ============================
+  
+  ## Compute Analyte Summary (mean & SD for each analyte)
+  analyte_summary <- compute_analyte_summary(wq)
+  
+  ## Compute Loads for All Analytes
+  all_loads <- compute_all_loads(analyte_summary, flow_aggregated)
+  
+  # ============================ OUTPUT AS OBJECT ============================
+  
+  ## Convert loads into a named list object
+  load_object <- list(volume = flow_sum)
+  
+  ## Store each analyte's load in the list
+  for (i in 1:nrow(all_loads)) {
+    analyte_name <- all_loads$analyte[i]
+    load_object[[analyte_name]] <- list(
+      load_kg = all_loads$load_kg[i],
+      load_upper_kg = all_loads$load_upper_kg[i],
+      load_lower_kg = all_loads$load_lower_kg[i]
+    )
+  }
+  
+  ## Print Summary
+  print(load_object)
+  
+  return(load_object)
 }
 
-# ============================ EXECUTION ============================
+# ============================ RUN FUNCTION ============================
 
-## Import Data
-wq_raw <- import_wq_data("./data/2022uym_wq.csv")
-flow_raw <- import_flow_data("./data/2022uym_flow.csv")
+load_results <- run_load_analysis(
+  wq_file = "./data/2022uym_wq.csv",
+  flow_file = "./data/2022uym_flow.csv",
+  start_date = "2022-06-12",
+  end_date = "2022-07-08",
+  user_interval = 4
+)
 
-## Process Data
-wq <- process_wq_data(wq_raw)
-flow <- process_flow_data(flow_raw)
-
-## Filter Data to Date Range
-start_date <- as.POSIXct("2022-06-12", tz = "UTC")
-end_date <- as.POSIXct("2022-07-08", tz = "UTC")
-
-wq <- filter(wq, collected >= start_date & collected <= end_date)
-flow <- filter(flow, datetime >= start_date & datetime <= end_date)
-
-## Aggregate Flow Data
-flow_aggregated <- aggregate_flow_data(flow, user_interval = 4)
-
-## Compute Analyte Summary
-analyte_summary <- compute_analyte_summary(wq)
-
-## Compute Loads for All Analytes
-all_loads <- compute_all_loads(analyte_summary, flow_aggregated)
-
-## Print Results
-print(all_loads)
+# Access results
+load_results$volume
+load_results$NO3_N$load_kg
