@@ -21,8 +21,6 @@ analyteAbbr.dict <- list(
   "EC25"  = c("Specific Conductance", "ELECTRICAL CONDUCTIVITY")
 )
 
-
-
 # ============================ IMPORT DATA ============================
 
 ## Water Quality Data
@@ -37,8 +35,8 @@ import_flow_data <- function(file_path) {
 
 # ============================ PROCESS DATA ============================
 
-## Process Water Quality Data (with analyte abbreviation mapping)
-process_wq_data <- function(wq_data) {
+## Process Water Quality Data (with treatment filter)
+process_wq_data <- function(wq_data, treatment_filter) {
   wq_data %>%
     mutate(
       collected = as.POSIXct(collected, format="%m/%d/%Y %H:%M", tz="UTC"),
@@ -49,28 +47,44 @@ process_wq_data <- function(wq_data) {
         if (length(match) == 0) NA else match
       }, FUN.VALUE = character(1))  # Ensures correct vector length
     ) %>%
-    filter(treatment.name == "Outflow") %>%
+    filter(treatment.name == treatment_filter) %>%  # Dynamic filtering
     filter(!is.na(analyte_abbr))  # Remove unmapped analytes
 }
 
-
-
 ## Process Flow Data
 process_flow_data <- function(flow_data) {
-  column_names <- c("datetime", "min_flow_gpm", "min_time", "max_flow_gpm", 
-                    "max_time", "avg_flow_gpm", "volume_gal", "sample_event")
+  # Check how many columns exist
+  num_columns <- ncol(flow_data)
   
-  flow_data %>%
+  # Define column names based on dataset format
+  if (num_columns == 8) {
+    column_names <- c("datetime", "min_flow_gpm", "min_time", "max_flow_gpm", 
+                      "max_time", "avg_flow_gpm", "volume_gal", "sample_event")
+  } else if (num_columns == 6) {
+    column_names <- c("datetime", "min_flow_gpm", "max_flow_gpm", 
+                      "avg_flow_gpm", "volume_gal", "sample_event")
+  } else {
+    stop("Unexpected number of columns in flow data: ", num_columns)
+  }
+  
+  flow_data <- flow_data %>%
     setNames(column_names) %>%
     mutate(
       datetime = as.POSIXct(datetime, format="%m/%d/%Y %H:%M", tz="UTC"),
-      date_only = as.Date(datetime),
-      min_time = as.POSIXct(paste(date_only, min_time), format="%Y-%m-%d %I:%M:%S %p", tz="UTC"),
-      max_time = as.POSIXct(paste(date_only, max_time), format="%Y-%m-%d %I:%M:%S %p", tz="UTC"),
-      volume_L = volume_gal * 3.78541  # Convert gallons to liters
+      volume_L = if ("volume_gal" %in% names(.)) volume_gal * 3.78541 else NA_real_
     ) %>%
-    select(-date_only)
+    # Only include time-based columns if they exist
+    { if ("min_time" %in% names(.)) 
+      mutate(., min_time = as.POSIXct(paste(as.Date(datetime), min_time), 
+                                      format="%Y-%m-%d %I:%M:%S %p", tz="UTC")) else . } %>%
+    { if ("max_time" %in% names(.)) 
+      mutate(., max_time = as.POSIXct(paste(as.Date(datetime), max_time), 
+                                      format="%Y-%m-%d %I:%M:%S %p", tz="UTC")) else . }
+  
+  return(flow_data)
 }
+
+
 
 # ============================ AGGREGATE FLOW DATA ============================
 
@@ -85,14 +99,35 @@ aggregate_flow_data <- function(flow_data, user_interval = 4) {
     ) %>%
     group_by(time_block) %>%
     summarise(
-      min_flow_gpm = min(min_flow_gpm, na.rm = TRUE),
-      max_flow_gpm = max(max_flow_gpm, na.rm = TRUE),
       avg_flow_gpm = mean(avg_flow_gpm, na.rm = TRUE),
-      volume_L = sum(volume_L, na.rm = TRUE),
+      volume_L = if ("volume_L" %in% names(flow_data) && any(!is.na(flow_data$volume_L))) {
+        sum(volume_L, na.rm = TRUE)
+      } else {
+        NA_real_
+      },
       sample_event = sum(sample_event, na.rm = TRUE),
+      min_flow_gpm = if ("min_flow_gpm" %in% names(flow_data) && any(!is.na(flow_data$min_flow_gpm))) {
+        suppressWarnings(min(min_flow_gpm, na.rm = TRUE))
+      } else {
+        NA_real_
+      },
+      max_flow_gpm = if ("max_flow_gpm" %in% names(flow_data) && any(!is.na(flow_data$max_flow_gpm))) {
+        suppressWarnings(max(max_flow_gpm, na.rm = TRUE))
+      } else {
+        NA_real_
+      },
       .groups = "drop"
-    )
+    ) %>%
+    # Replace Inf values with NA to prevent issues
+    mutate(
+      min_flow_gpm = ifelse(is.infinite(min_flow_gpm), NA_real_, min_flow_gpm),
+      max_flow_gpm = ifelse(is.infinite(max_flow_gpm), NA_real_, max_flow_gpm)
+    ) %>%
+    # Remove NA columns only if they weren’t originally present
+    select(where(~ !all(is.na(.))))
 }
+
+
 
 # ============================ COMPUTE ANALYTE SUMMARY ============================
 
@@ -142,7 +177,7 @@ compute_all_loads <- function(analyte_obj, flow_data) {
 
 # ============================ RUN LOAD ANALYSIS FUNCTION ============================
 
-run_load_analysis <- function(wq_file, flow_file, start_date, end_date, user_interval = 4) {
+run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatment_filter = "Outflow", user_interval = 4) {
   
   # ============================ IMPORT & PROCESS DATA ============================
   
@@ -150,8 +185,8 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date, user_int
   wq_raw <- import_wq_data(wq_file)
   flow_raw <- import_flow_data(flow_file)
   
-  ## Process Data
-  wq <- process_wq_data(wq_raw)
+  ## Process Data (now allows user-specified treatment)
+  wq <- process_wq_data(wq_raw, treatment_filter)
   flow <- process_flow_data(flow_raw)
   
   ## Filter Data to Date Range
@@ -173,25 +208,7 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date, user_int
   ## Compute Loads for All Analytes
   all_loads <- compute_all_loads(analyte_summary, flow_aggregated)
   
-  # ============================ OUTPUT AS OBJECT ============================
-  
-  ## Convert loads into a named list object
-  load_object <- list(volume = flow_sum)
-  
-  ## Store each analyte's load in the list
-  for (i in 1:nrow(all_loads)) {
-    analyte_name <- all_loads$analyte[i]
-    load_object[[analyte_name]] <- list(
-      load_kg = all_loads$load_kg[i],
-      load_upper_kg = all_loads$load_upper_kg[i],
-      load_lower_kg = all_loads$load_lower_kg[i]
-    )
-  }
-  
-  ## Print Summary
-  print(load_object)
-  
-  return(load_object)
+  return(list(volume = flow_sum, loads = all_loads))
 }
 
 # ============================ RUN FUNCTION ============================
@@ -201,9 +218,10 @@ load_results <- run_load_analysis(
   flow_file = "./data/2022uym_flow.csv",
   start_date = "2022-06-12",
   end_date = "2022-07-08",
+  treatment_filter = "Outflow",  # User can now specify treatment!
   user_interval = 4
 )
 
 # Access results
 load_results$volume
-load_results$NO3_N$load_kg
+load_results$loads

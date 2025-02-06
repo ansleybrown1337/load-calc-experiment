@@ -59,14 +59,7 @@ load_results$NO3_N$load_upper_kg  # Upper bound
 load_results$NO3_N$load_lower_kg  # Lower bound
 ```
 
-## File Structure
-```
-|-- data/
-|   |-- 2022uym_wq.csv    # Water quality data
-|   |-- 2022uym_flow.csv  # Flow data
-|-- load_calc.R           # Main script
-|-- README.md             # Documentation
-```
+## Units
 
 ## Data Format Requirements
 ### **Water Quality Data (CSV)**
@@ -99,9 +92,15 @@ load_results$NO3_N$load_lower_kg  # Lower bound
   - `volume_gal` (total volume in gallons)
   - `sample_event` (indicator if a sample was collected, 1 = Yes, NA = No)
 
+### Output Units in R Object
+
+- Total volume is converted to liters (L) (1 gallon = 3.78541 L).
+- Aggregated volumes are reported in liters (L).
+- Final loads are converted to kilograms (kg) (mg / 1e6).
+
 ---
 
-## Example Output
+## Example R Code
 ```r
 > load_results <- run_load_analysis(
 +   wq_file = "./data/2022uym_wq.csv",
