@@ -5,6 +5,10 @@
 library(dplyr)
 library(tidyr)
 
+# TODO
+  # integrate LCS flow data types for import
+  # integrate user-based time aggregation in final function
+
 # ============================ ANALYTE ABBREVIATION DICTIONARY ============================
 
 analyteAbbr.dict <- list(
@@ -183,22 +187,33 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatmen
   
   ## Import Data
   wq_raw <- import_wq_data(wq_file)
+  print(paste0("WQ Data Imported: ", nrow(wq_raw), " rows"))
   flow_raw <- import_flow_data(flow_file)
+  print(paste0("Flow Data Imported: ", nrow(flow_raw), " rows"))
   
   ## Process Data (now allows user-specified treatment)
   wq <- process_wq_data(wq_raw, treatment_filter)
+  print("WQ Data Processed")
   flow <- process_flow_data(flow_raw)
+  print("Flow Data Processed")
   
   ## Filter Data to Date Range
+  ### aj note 10 feb 2024: doesn't filter well if NAs present in dates
   start_date <- as.POSIXct(start_date, tz = "UTC")
+  print(paste0("Start Date: ", start_date))
   end_date <- as.POSIXct(end_date, tz = "UTC")
+  print(paste0("End Date: ", end_date))
   
   wq <- filter(wq, collected >= start_date & collected <= end_date)
+  print(paste0("WQ Data Filtered: ", nrow(wq), " rows"))
   flow <- filter(flow, datetime >= start_date & datetime <= end_date)
+  print(paste0("Flow Data Filtered: ", nrow(flow), " rows"))
   
   ## Aggregate Flow Data
   flow_aggregated <- aggregate_flow_data(flow, user_interval = user_interval)
+  print(paste0("Flow Data Aggregated: ", nrow(flow_aggregated), " rows"))
   flow_sum <- sum(flow_aggregated$volume_L)
+  print(paste0("Total Volume, L: ", flow_sum, " | Gallons: ", flow_sum * 0.264172))
   
   # ============================ ANALYTE PROCESSING ============================
   
@@ -211,17 +226,56 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatmen
   return(list(volume = flow_sum, loads = all_loads))
 }
 
-# ============================ RUN FUNCTION ============================
+# ============================ RUN FUNCTION EXAMPLE ============================
 
-load_results <- run_load_analysis(
-  wq_file = "./data/2022uym_wq.csv",
-  flow_file = "./data/2022uym_flow.csv",
-  start_date = "2022-06-12",
-  end_date = "2022-07-08",
-  treatment_filter = "Outflow",  # User can now specify treatment!
-  user_interval = 4
-)
+# load_results <- run_load_analysis(
+#   wq_file = "./data/2022uym_wq.csv",
+#   flow_file = "./data/2022uym_flow.csv",
+#   start_date = "2022-06-12",
+#   end_date = "2022-07-08",
+#   treatment_filter = "Outflow",  # User can now specify treatment!
+#   user_interval = 4
+# )
+# 
+# # Access results
+# load_results$volume
+# load_results$loads
 
-# Access results
-load_results$volume
-load_results$loads
+# ============================ SUM OBJECTS FXN ============================
+
+sum_load_objects <- function(...) {
+  # Capture all load objects passed to the function
+  load_objects <- list(...)
+  
+  # Sum total volume
+  total_volume <- sum(sapply(load_objects, function(obj) obj$volume), na.rm = TRUE)
+  
+  # Extract original analyte order from the first load object
+  original_order <- load_objects[[1]]$loads$analyte
+  
+  # Combine all loads into a single data frame
+  combined_loads <- bind_rows(lapply(load_objects, function(obj) obj$loads))
+  
+  # Sum loads by analyte and preserve original order
+  total_loads <- combined_loads %>%
+    group_by(analyte) %>%
+    summarise(
+      load_kg = sum(load_kg, na.rm = TRUE),
+      load_upper_kg = sum(load_upper_kg, na.rm = TRUE),
+      load_lower_kg = sum(load_lower_kg, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    # Preserve the original order of analytes
+    arrange(factor(analyte, levels = original_order))
+  
+  # Return the summed object with the same structure
+  summed_object <- list(
+    volume = total_volume,
+    loads = total_loads
+  )
+  
+  return(summed_object)
+}
+
+
+
