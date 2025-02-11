@@ -79,8 +79,8 @@ total23_mol$loads
 ## 2024 SC Data
 
 mol24_event1 <- run_load_analysis(
-  wq_file = "./private-data/Molina/molina23_wq.csv",
-  flow_file = "./private-data/Molina/molina23_flow_BADYEAR.csv",
+  wq_file = "./private-data/Molina/molina24_wq.csv",
+  flow_file = "./private-data/Molina/molina24_flow.csv",
   start_date = "2024-05-17",
   end_date = "2024-06-03",
   treatment_filter = "Outflow",  # User can now specify treatment!
@@ -91,8 +91,8 @@ mol24_event1$volume
 mol24_event1$loads
 
 mol24_event2 <- run_load_analysis(
-  wq_file = "./private-data/Molina/molina23_wq.csv",
-  flow_file = "./private-data/Molina/molina23_flow_BADYEAR.csv",
+  wq_file = "./private-data/Molina/molina24_wq.csv",
+  flow_file = "./private-data/Molina/molina24_flow.csv",
   start_date = "2024-06-15",
   end_date = "2024-07-13",
   treatment_filter = "Outflow",  # User can now specify treatment!
@@ -102,3 +102,6 @@ mol24_event2 <- run_load_analysis(
 mol24_event2$volume
 mol24_event2$loads
 
+total24_mol <- sum_load_objects(mol24_event1, mol24_event2)
+total24_mol$volume
+total24_mol$loads
