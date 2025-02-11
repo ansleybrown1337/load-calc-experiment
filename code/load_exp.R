@@ -4,6 +4,7 @@
 # Load required libraries
 library(dplyr)
 library(tidyr)
+library(lubridate)
 
 # TODO
   # integrate LCS flow data types for import
@@ -43,17 +44,35 @@ import_flow_data <- function(file_path) {
 process_wq_data <- function(wq_data, treatment_filter) {
   wq_data %>%
     mutate(
-      collected = as.POSIXct(collected, format="%m/%d/%Y %H:%M", tz="UTC"),
-      received = as.POSIXct(received, format="%m/%d/%Y %H:%M", tz="UTC"),
+      # Add support for different formats including '30 May 2024 09:35'
+      collected = parse_date_time(collected, orders = c("mdY HM", "mdY", "Ymd HMS", "Ymd", "d b Y HM")),
+      
+      received = parse_date_time(received, orders = c("mdY HM", "mdY", "Ymd HMS", "Ymd", "d b Y HM")),
+      
       treatment.name = as.character(treatment.name),
+      
+      # Apply analyte abbreviation mapping
       analyte_abbr = vapply(analyte, function(a) {
         match <- names(analyteAbbr.dict)[sapply(analyteAbbr.dict, function(x) a %in% x)]
         if (length(match) == 0) NA else match
-      }, FUN.VALUE = character(1))  # Ensures correct vector length
+      }, FUN.VALUE = character(1))
     ) %>%
-    filter(treatment.name == treatment_filter) %>%  # Dynamic filtering
-    filter(!is.na(analyte_abbr))  # Remove unmapped analytes
-}
+    # Adjust treatment filter to check both 'treatment.name' and 'event.type'
+    {
+      if (all(is.na(.$treatment.name))) {
+        stop("Warning: All values in 'treatment.name' are NA. Please verify your dataset and ensure 'treatment.name' is correctly populated.")
+      } else {
+        filter(., treatment.name == treatment_filter | event.type == treatment_filter)
+      }
+    } %>%  
+    {
+      if (any(is.na(.$analyte_abbr))) {
+        stop("Warning: Some analytes could not be mapped. Please check for unmapped analytes and update 'analyteAbbr.dict' accordingly.")
+      } else {
+        .
+      }
+    }
+  }
 
 ## Process Flow Data
 process_flow_data <- function(flow_data) {
