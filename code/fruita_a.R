@@ -11,8 +11,8 @@ source("./code/load_exp.R")
 alf24_event3 <- run_load_analysis(
   wq_file = "./private-data/Fruita A/2024_fruitaA_wq.csv",
   flow_file = "./private-data/Fruita A/2024_fruitaA_flow.csv",
-  start_date = "2024-04-13",
-  end_date = "2024-04-22",
+  start_date = "2024-05-20",
+  end_date = "2024-05-30",
   treatment_filter = "Outflow",  # User can now specify treatment!
   user_interval = 1
 )
@@ -23,8 +23,8 @@ alf24_event3$loads
 alf24_event4 <- run_load_analysis(
   wq_file = "./private-data/Fruita A/2024_fruitaA_wq.csv",
   flow_file = "./private-data/Fruita A/2024_fruitaA_flow.csv",
-  start_date = "2024-04-13",
-  end_date = "2024-04-22",
+  start_date = "2024-06-10",
+  end_date = "2024-06-20",
   treatment_filter = "Outflow",  # User can now specify treatment!
   user_interval = 1
 )
@@ -35,8 +35,8 @@ alf24_event4$loads
 alf24_event6 <- run_load_analysis(
   wq_file = "./private-data/Fruita A/2024_fruitaA_wq.csv",
   flow_file = "./private-data/Fruita A/2024_fruitaA_flow.csv",
-  start_date = "2024-04-13",
-  end_date = "2024-04-22",
+  start_date = "2024-07-14",
+  end_date = "2024-07-24",
   treatment_filter = "Outflow",  # User can now specify treatment!
   user_interval = 1
 )
@@ -47,8 +47,8 @@ alf24_event6$loads
 alf24_event8 <- run_load_analysis(
   wq_file = "./private-data/Fruita A/2024_fruitaA_wq.csv",
   flow_file = "./private-data/Fruita A/2024_fruitaA_flow.csv",
-  start_date = "2024-04-13",
-  end_date = "2024-04-22",
+  start_date = "2024-08-20",
+  end_date = "2024-08-30",
   treatment_filter = "Outflow",  # User can now specify treatment!
   user_interval = 1
 )
@@ -57,7 +57,7 @@ alf24_event8$volume
 alf24_event8$loads
 
 
-total24_alf <- sum_load_objects(alf24_event1, alf24_event3)
+total24_alf <- sum_load_objects(alf24_event3, alf24_event4, alf24_event6, alf24_event8)
 total24_alf$volume
 total24_alf$loads
 
