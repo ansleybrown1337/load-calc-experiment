@@ -20,8 +20,8 @@ analyteAbbr.dict <- list(
   "TDS"   = c("Total Dissolved Solids (Residue, Filterable)"),
   "NO3_N" = c("Nitrogen, Nitrate (As N)", "NITRATE AS N"),
   "TSS"   = c("Suspended Solids (Residue, Non-Filterable)", "TSS"),
-  "Fe"    = c("Iron, Total"),
-  "Se"    = c("Selenium, Total", "SELENIUM"),
+  "Fe (g not kg)"    = c("Iron, Total"),
+  "Se (g not kg)"    = c("Selenium, Total", "SELENIUM"),
   "pH"    = c("pH", "POTENTIAL HYDROGEN"),
   "EC25"  = c("Specific Conductance", "ELECTRICAL CONDUCTIVITY")
 )
@@ -45,9 +45,9 @@ process_wq_data <- function(wq_data, treatment_filter) {
   wq_data %>%
     mutate(
       # Add support for different formats including '30 May 2024 09:35'
-      collected = parse_date_time(collected, orders = c("mdY HM", "mdY", "Ymd HMS", "Ymd", "d b Y HM")),
+      collected = as.POSIXct(parse_date_time(collected, orders = c("mdY HM", "mdY", "Ymd HMS", "Ymd", "d b Y HM")), tz = "UTC"),
       
-      received = parse_date_time(received, orders = c("mdY HM", "mdY", "Ymd HMS", "Ymd", "d b Y HM")),
+      received = as.POSIXct(parse_date_time(received, orders = c("mdY HM", "mdY", "Ymd HMS", "Ymd", "d b Y HM")), tz = "UTC"),
       
       treatment.name = as.character(treatment.name),
       
@@ -225,8 +225,14 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatmen
   
   wq <- filter(wq, collected >= start_date & collected <= end_date)
   print(paste0("WQ Data Filtered: ", nrow(wq), " rows"))
+  if (nrow(wq) == 0) {
+    warning("No WQ data found in the selected time frame. Check your treatment filter and date range.")
+  }
   flow <- filter(flow, datetime >= start_date & datetime <= end_date)
   print(paste0("Flow Data Filtered: ", nrow(flow), " rows"))
+  if (nrow(flow) == 0) {
+    warning("No flow data found in the selected time frame. Check your treatment filter and date range.")
+  }
   
   ## Aggregate Flow Data
   flow_aggregated <- aggregate_flow_data(flow, user_interval = user_interval)
@@ -296,5 +302,51 @@ sum_load_objects <- function(...) {
   return(summed_object)
 }
 
+# ================== CONVERT LOAD TO SPATIAL UNITS ============================
 
+convert_load_to_spatial <- function(load_object, acreage) {
+  
+  # Conversion factors
+  
+  L_to_acre_ft <- 8.10714e-7  # 1 liter = 8.10714e-7 acre-feet
+  kg_to_lbs <- 2.20462      # 1 kg = 2.20462 lbs
+  g_to_lbs <- 0.00220462    # 1 g = 0.00220462 lbs
+  
+  # Convert volume to acre-feet
+  
+  volume_acre_ft <- load_object$volume * L_to_acre_ft
+  
+  # Convert loads to lbs, kg, and lbs/acre
+  
+  converted_loads <- load_object$loads %>%
+    mutate(
+      load_lbs = ifelse(
+        analyte %in% c("Fe (g not kg)", "Se (g not kg)"),  # If analyte is in grams
+        load_kg * g_to_lbs,                                  # Convert g → lbs
+        load_kg * kg_to_lbs                                  # Convert kg → lbs
+      ),
+      load_upper_lbs = ifelse(
+        analyte %in% c("Fe (g not kg)", "Se (g not kg)"),
+        load_upper_kg * g_to_lbs,
+        load_upper_kg * kg_to_lbs
+      ),
+      load_lower_lbs = ifelse(
+        analyte %in% c("Fe (g not kg)", "Se (g not kg)"),
+        load_lower_kg * g_to_lbs,
+        load_lower_kg * kg_to_lbs
+      ),
+      lbs_acre = load_lbs / acreage,
+      upper_lbs_acre = load_upper_lbs / acreage,
+      lower_lbs_acre = load_lower_lbs / acreage
+    ) %>%
+    select(analyte,load_lbs, load_upper_lbs, load_lower_lbs,
+           lbs_acre, upper_lbs_acre, lower_lbs_acre)
+  
+  # Return converted object with the same structure
+  
+  return(list(
+    volume_acre_ft = volume_acre_ft,
+    loads = converted_loads
+  ))
+}
 
