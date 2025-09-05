@@ -45,13 +45,13 @@ total22_mol <- sum_load_objects(mol22_event1, mol22_event2, mol22_event3)
 total22_mol$volume
 total22_mol$loads
 
-## 2023 Molina Data - bad flow data dates
+## 2023 Molina Data - bad flow data dates - Fixed 9/5/25 noted by AJ
 
 mol23_event1 <- run_load_analysis(
   wq_file = "./private-data/Molina/molina23_wq.csv",
-  flow_file = "./private-data/Molina/molina23_flow_BADYEAR.csv",
-  start_date = "2022-06-12",
-  end_date = "2022-07-08",
+  flow_file = "./private-data/Molina/molina23_flow.csv",
+  start_date = "2023-05-23",
+  end_date = "2023-07-08",
   treatment_filter = "Outflow",  # User can now specify treatment!
   user_interval = 4
 )
@@ -61,9 +61,9 @@ mol23_event1$loads
 
 mol23_event2 <- run_load_analysis(
   wq_file = "./private-data/Molina/molina23_wq.csv",
-  flow_file = "./private-data/Molina/molina23_flow_BADYEAR.csv",
-  start_date = "2023-05-17",
-  end_date = "2023-06-03",
+  flow_file = "./private-data/Molina/molina23_flow.csv",
+  start_date = "2023-07-09",
+  end_date = "2023-09-30",
   treatment_filter = "Outflow",  # User can now specify treatment!
   user_interval = 4
 )

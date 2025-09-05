@@ -76,16 +76,14 @@ process_wq_data <- function(wq_data, treatment_filter) {
 
 ## Process Flow Data
 process_flow_data <- function(flow_data) {
-  # Check how many columns exist
   num_columns <- ncol(flow_data)
   
-  # Define column names based on dataset format
   if (num_columns == 8) {
-    column_names <- c("datetime", "min_flow_gpm", "min_time", "max_flow_gpm", 
-                      "max_time", "avg_flow_gpm", "volume_gal", "sample_event")
+    column_names <- c("datetime","min_flow_gpm","min_time","max_flow_gpm",
+                      "max_time","avg_flow_gpm","volume_gal","sample_event")
   } else if (num_columns == 6) {
-    column_names <- c("datetime", "min_flow_gpm", "max_flow_gpm", 
-                      "avg_flow_gpm", "volume_gal", "sample_event")
+    column_names <- c("datetime","min_flow_gpm","max_flow_gpm",
+                      "avg_flow_gpm","volume_gal","sample_event")
   } else {
     stop("Unexpected number of columns in flow data: ", num_columns)
   }
@@ -93,19 +91,28 @@ process_flow_data <- function(flow_data) {
   flow_data <- flow_data %>%
     setNames(column_names) %>%
     mutate(
-      datetime = as.POSIXct(datetime, format="%m/%d/%Y %H:%M", tz="UTC"),
+      # parse timestamp
+      datetime = as.POSIXct(datetime, format = "%m/%d/%Y %H:%M", tz = "UTC"),
+      # clean and coerce numerics
+      across(
+        intersect(c("min_flow_gpm","max_flow_gpm","avg_flow_gpm","volume_gal","sample_event"), names(.)),
+        ~ suppressWarnings(as.numeric(gsub(",", "", trimws(as.character(.)))))
+      ),
+      # now safe to compute liters
       volume_L = if ("volume_gal" %in% names(.)) volume_gal * 3.78541 else NA_real_
     ) %>%
-    # Only include time-based columns if they exist
-    { if ("min_time" %in% names(.)) 
-      mutate(., min_time = as.POSIXct(paste(as.Date(datetime), min_time), 
-                                      format="%Y-%m-%d %I:%M:%S %p", tz="UTC")) else . } %>%
-    { if ("max_time" %in% names(.)) 
-      mutate(., max_time = as.POSIXct(paste(as.Date(datetime), max_time), 
-                                      format="%Y-%m-%d %I:%M:%S %p", tz="UTC")) else . }
+    { if ("min_time" %in% names(.))
+      mutate(., min_time = as.POSIXct(paste(as.Date(datetime), min_time),
+                                      format = "%Y-%m-%d %I:%M:%S %p", tz = "UTC"))
+      else . } %>%
+    { if ("max_time" %in% names(.))
+      mutate(., max_time = as.POSIXct(paste(as.Date(datetime), max_time),
+                                      format = "%Y-%m-%d %I:%M:%S %p", tz = "UTC"))
+      else . }
   
-  return(flow_data)
+  flow_data
 }
+
 
 
 
@@ -191,12 +198,36 @@ compute_load <- function(analyte_obj, analyte_name, flow_data) {
   ))
 }
 
-## Compute Loads for All Analytes
-compute_all_loads <- function(analyte_obj, flow_data) {
-  analyte_names <- names(analyte_obj)
-  loads <- lapply(analyte_names, function(analyte) compute_load(analyte_obj, analyte, flow_data))
-  bind_rows(loads)
+## Compute Loads for All Analytes (with exclusions for ec&ph + status message)
+compute_all_loads <- function(analyte_obj, flow_data, drop_analytes = c("EC25", "pH")) {
+  # Keep only analytes that should have mass-based loads
+  analyte_names <- setdiff(names(analyte_obj), drop_analytes)
+  
+  # Status message if any analytes are dropped
+  if (length(drop_analytes) > 0) {
+    message("Note: The following analytes were excluded from load calculations because they are not mass-based: ",
+            paste(drop_analytes, collapse = ", "))
+  }
+  
+  # If nothing left to compute, return an empty-but-correctly-shaped frame
+  if (length(analyte_names) == 0) {
+    return(dplyr::tibble(
+      analyte = character(),
+      load_kg = double(),
+      load_upper_kg = double(),
+      load_lower_kg = double()
+    ))
+  }
+  
+  # Compute loads
+  loads <- lapply(analyte_names, function(analyte) {
+    compute_load(analyte_obj, analyte, flow_data)
+  })
+  
+  dplyr::bind_rows(loads)
 }
+
+
 
 # ============================ RUN LOAD ANALYSIS FUNCTION ============================
 
