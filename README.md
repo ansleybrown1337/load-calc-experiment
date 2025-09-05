@@ -1,141 +1,189 @@
 # Load Calculation Experiment
 
 ## Purpose
-This script calculates water analyte loads based on **water quality data (WQ)** and **flow data**, while also showcasing the limitations of the methods used. It aggregates flow rates, maps analyte names to standardized abbreviations, and estimates uncertainty in load calculations using **standard deviations**. The user can specify the treatment location (e.g., `Outflow`, `Inflow`) and set custom aggregation intervals for flow data.
+
+This script calculates water analyte loads based on **water quality (WQ)** and **flow** data, while also documenting important assumptions and limitations. It aggregates flow, maps analyte names to standardized abbreviations, and estimates uncertainty in loads using **standard deviations**. You can choose the treatment location (e.g., `Outflow`, `Inflow`) and set the flow aggregation interval.
 
 ## Author
-**A.J. Brown**  
-_Agricultural Data Scientist, CSU Agricultural Water Quality Program_
+
+**A.J. Brown**
+*Agricultural Data Scientist, CSU Agricultural Water Quality Program*
 
 ## Features
-- **Automated Processing:** Imports and processes WQ and flow data.
-- **Custom Treatment Selection:** Users can specify `treatment.name` dynamically.
-- **Analyte Mapping:** Matches old and new analyte names to standardized abbreviations.
-- **Flow Aggregation:** Supports user-defined time intervals (e.g., 4-hour blocks).
-- **Load Calculation:** Computes analyte loads in kg with upper/lower bounds.
-- **Easy-to-Access Output:** Returns a structured list containing volume and analyte loads.
+
+* **Automated processing** of WQ and flow CSVs.
+* **Custom treatment selection** via `treatment_filter`.
+* **Analyte name mapping** to standardized abbreviations.
+* **Flow aggregation** to user-defined intervals (e.g., 4-hour blocks).
+* **Load calculation** (kg) with upper/lower bounds using ±1 SD (lower bound clamped at 0).
+* **Clear status messages** during processing (import counts, date filtering, excluded analytes, etc.).
+* **Simple outputs**: a list containing total volume (L) and a tidy analyte load table.
+
+### What’s new (backend improvements)
+
+* **EC25 & pH automatically excluded** from load results (with a status line).
+* **Non-detects (ND and `<MDL`) treated as zeros** (commented as such in the code).
+* **Prototype flow-weighted mean concentration (FWMC)** utilities included but **not active** (no behavior change unless you opt-in later).
+* **Safer math**: volume sums use `na.rm=TRUE`; negative lower bounds clamped to 0; guards for zero/NA flow.
 
 ---
 
 ## Installation & Dependencies
-This script requires **R** and the following libraries:
+
+Requires **R** and these libraries:
+
 ```r
-install.packages(c("dplyr", "tidyr"))
+install.packages(c("dplyr", "tidyr", "lubridate"))
 ```
+
+---
 
 ## Usage
-### 1. Import the Script
-Save the script as `load_calc.R` and source it in R:
+
+### 1) Import the functions
+
+Save the script as `load_exp.R` and source it:
+
 ```r
-source("load_calc.R")
+source("./code/load_exp.R")
 ```
 
-### 2. Run Load Calculation
-To execute the script, use:
+### 2) Run a load calculation
+
 ```r
 load_results <- run_load_analysis(
   wq_file = "./data/2022uym_wq.csv",
   flow_file = "./data/2022uym_flow.csv",
   start_date = "2022-06-12",
   end_date = "2022-07-08",
-  treatment_filter = "Outflow",  # Change to "Inflow" or other treatments as needed
-  user_interval = 4  # Time aggregation in hours
+  treatment_filter = "Outflow",  # or "Inflow", etc.
+  user_interval = 4              # aggregation in hours
 )
 ```
 
-### 3. Access Results
-#### a) Total Water Volume (L)
+### 3) Access results
+
+* **Total outflow volume (L)**
+
 ```r
 load_results$volume
 ```
-#### b) Analyte Load Estimates
+
+* **Analyte load table (kg)**
+
 ```r
 load_results$loads
+# Columns: analyte, load_kg, load_upper_kg, load_lower_kg
 ```
-#### c) Accessing a Specific Analyte Load
+
+* **Access a specific analyte’s row**, e.g., NO3\_N:
+
 ```r
-load_results$NO3_N$load_kg        # Mean estimated load
-load_results$NO3_N$load_upper_kg  # Upper bound
-load_results$NO3_N$load_lower_kg  # Lower bound
+subset(load_results$loads, analyte == "NO3_N")
+# or dplyr:
+# dplyr::filter(load_results$loads, analyte == "NO3_N")
 ```
 
-## Units
-
-## Data Format Requirements
-### **Water Quality Data (CSV)**
-**Expected structure before processing:**
-- **Headers start on row 1**
-- **Columns:**
-  - `location.name` (e.g. "Kerbel")
-  - `treatment.name` (e.g., Outflow, Inflow, CT, MT, ST, W1, etc.)
-  - `event.type` (e.g., "Inflow", "Outflow", "Point Sample")
-  - `sample.id` (i.e., AWQP sample ID)
-  - `lab.id.x` (i.e., ALS Lab ID)
-  - `method` (e.g., "SM 4500-NH3", "SM 4500-NO3")
-  - `cas.number` (i.e., ALS Lab Information)
-  - `analyte` (e.g., "NITRATE AS N", "SELENIUM")
-  - `result` (numeric concentration value)
-  - `units` (e.g., "MG/L", "UG/L")
-  - `collected` (datetime, format: MM/DD/YYYY HH:MM)
-  - `received` (datetime, format: MM/DD/YYYY HH:MM)
-
-### **Flow Data (CSV)**
-**Expected structure before processing:**
-- **Headers start on row 7**
-- **Columns (not named in file due to no headers, but named in this code):**
-  - `datetime` (timestamp of flow measurement, format: MM/DD/YYYY HH:MM)
-  - `min_flow_gpm` (minimum flow in gpm)
-  - `min_time` (time when min flow occurred, format: HH:MM:SS AM/PM)
-  - `max_flow_gpm` (maximum flow in gpm)
-  - `max_time` (time when max flow occurred, format: HH:MM:SS AM/PM)
-  - `avg_flow_gpm` (average flow in gpm)
-  - `volume_gal` (total volume in gallons)
-  - `sample_event` (indicator if a sample was collected, 1 = Yes, NA = No)
-
-### Output Units in R Object
-
-- Total volume is converted to liters (L) (1 gallon = 3.78541 L).
-- Aggregated volumes are reported in liters (L).
-- Final loads are converted to kilograms (kg) (mg / 1e6).
+> Note: **EC25** and **pH** are always excluded from `load_results$loads` (status message is printed during the run).
 
 ---
 
-## Example R Code
-```r
-> load_results <- run_load_analysis(
-+   wq_file = "./data/2022uym_wq.csv",
-+   flow_file = "./data/2022uym_flow.csv",
-+   start_date = "2022-06-12",
-+   end_date = "2022-07-08",
-+   treatment_filter = "Outflow",  # User can now specify treatment!
-+   user_interval = 4
-+ )
-> # Access results
-> load_results$volume
-[1] 70124942
-> load_results$loads
-  analyte     load_kg load_upper_kg load_lower_kg
-1    EC25         NaN           NaN           NaN
-2   NO2_N   91.162425     91.162425    91.1624252
-3   NO3_N    0.000000      0.000000     0.0000000
-4      pH         NaN           NaN           NaN
-5   PO4_P    0.000000      0.000000     0.0000000
-6      Se    0.000000      0.000000     0.0000000
-7      TP    1.928436      4.155938    -0.2990661
-8     TSS 1869.998465   2103.748274  1636.2486571
-> load_results$NO3_N$load_kg
-[1] 0
-> load_results$NO3_N$load_upper_kg
-[1] 0
-> load_results$NO3_N$load_lower_kg
-[1] 0
+## Units
+
+* **Flow/Volume**
+  Input volume (gallons) → converted to **liters (L)** using `1 gal = 3.78541 L`.
+  Total and aggregated volumes are reported in **liters (L)**.
+
+* **Concentrations**
+  Expected to be **mg/L** (see WQ data format below).
+
+* **Loads**
+  Computed as `mg/L × L = mg`, then converted to **kg** by dividing by **1e6**.
+
+* **Uncertainty bounds**
+  `load_upper_kg` and `load_lower_kg` use ±1 SD around the mean concentration; lower bound is clamped to 0.
+
+---
+
+## Data Format Requirements
+
+### Water Quality CSV
+
+**Expected structure (headers on row 1):**
+
+* `location.name`
+* `treatment.name` (e.g., Outflow, Inflow, CT, MT, ST, W1, …)
+* `event.type` (e.g., "Inflow", "Outflow", "Point Sample")
+* `sample.id` (AWQP sample ID)
+* `lab.id.x` (ALS Lab ID)
+* `method` (e.g., "SM 4500-NH3", "SM 4500-NO3")
+* `cas.number`
+* `analyte` (e.g., "NITRATE AS N", "SELENIUM")
+* `result` (**numeric concentration in mg/L**; see ND rules below)
+* `units` (e.g., "MG/L", "UG/L")
+* `collected` (MM/DD/YYYY HH\:MM)
+* `received` (MM/DD/YYYY HH\:MM)
+
+**ND / Censored values:**
+
+* **By design, NDs are treated as zeros.**
+* Strings like `"ND"`, `"nd"`, `"non-detect"`, `"n/d"`, and values like `"<0.01"` are parsed to **0**.
+* If your lab provides MDLs separately and you prefer half-MDL or other rules, you can adjust the helper in `process_wq_data()`.
+
+### Flow CSV
+
+**Expected structure (headers start on row 7 in the source file; the code assigns names):**
+
+* `datetime` (MM/DD/YYYY HH\:MM)
+* `min_flow_gpm`
+* `min_time` (HH\:MM\:SS AM/PM)
+* `max_flow_gpm`
+* `max_time` (HH\:MM\:SS AM/PM)
+* `avg_flow_gpm`
+* `volume_gal`
+* `sample_event` (1 = Yes, NA = No)
+
+> The script converts `volume_gal` → `volume_L` and aggregates by your specified `user_interval` (hours).
+
+---
+
+## Example Session Output (abridged)
+
+During a run you’ll see messages like:
+
 ```
+WQ Data Imported: 108 rows
+Flow Data Imported: 39613 rows
+WQ Data Processed
+Flow Data Processed
+Start Date: 2023-05-03 00:00:00 UTC
+End Date: 2023-08-03 00:00:00 UTC
+WQ Data Filtered: 24 rows
+Flow Data Filtered: 10562 rows
+Flow Data Aggregated: 552 rows
+Total Volume, L: 1.11e+07 | Gallons: 2.94e+06
+Note: The following analytes were excluded from load calculations because they are not mass-based: EC25, pH
+Excluded non-mass analytes from load calc: EC25, pH
+Final analytes in load table: NO2_N, NO3_N, PO4_P, TP, TDS, TKN, TSS, Se (g not kg), Fe (g not kg)
+```
+
+---
+
+## Prototype: Flow-Weighted Mean Concentrations (FWMC)
+
+The code includes **prototype** helpers to compute flow-weighted concentrations by aligning WQ timestamps to aggregated flow `time_block`s within a tolerance window.
+**These functions are not active** in `run_load_analysis()` to avoid changing your current results.
+To pilot later:
+
+1. `wq_aligned <- align_wq_to_flow_prototype(wq, flow_aggregated)`
+2. `analyte_summary <- compute_analyte_summary_fwmc_prototype(wq_aligned, flow_aggregated)`
 
 ---
 
 ## License
-This project is licensed under the **GNU GPL v2 License**.
+
+This project is licensed under the **GNU GPL v2**.
 
 ## Contact
-For questions, improvements, or collaborations, contact **A.J. Brown** at **CSU Agricultural Water Quality Program**.
 
+For questions, improvements, or collaborations, contact **A.J. Brown** – CSU Agricultural Water Quality Program.
