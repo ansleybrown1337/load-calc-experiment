@@ -278,6 +278,30 @@ compute_all_loads <- function(analyte_obj, flow_data, drop_analytes = c("EC25", 
 
 # ============================ RUN LOAD ANALYSIS FUNCTION ============================
 
+# Warn if multiple sampling dates are present in the filtered WQ
+warn_if_multiple_sampling_events <- function(wq_df, enable = TRUE) {
+  if (!enable || nrow(wq_df) == 0 || !"collected" %in% names(wq_df)) return(invisible(NULL))
+  # collapse to date (not datetime) so dup samples on same day don't count as separate events
+  dates <- as.Date(wq_df$collected)
+  dates <- dates[is.finite(as.numeric(dates))]  # drop NA dates quietly
+  uniq <- sort(unique(dates))
+  if (length(uniq) > 1) {
+    # counts by date for context
+    counts <- sort(table(dates))
+    warning(
+      paste0(
+        "Multiple WQ sampling events detected in the selected date range. ",
+        "The load calculation will average concentrations across these dates. ",
+        "Dates (n): ",
+        paste(paste0(names(counts), " (", as.integer(counts), ")"), collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+  invisible(NULL)
+}
+
+
 run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatment_filter = "Outflow", user_interval = 4) {
   
   # ============================ IMPORT & PROCESS DATA ============================
@@ -306,6 +330,9 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatmen
   if (nrow(wq) == 0) {
     warning("No WQ data found in the selected time frame. Check your treatment filter and date range.")
   }
+  # Inform user if multiple sampling dates will be averaged
+  warn_if_multiple_sampling_events(wq, enable = TRUE)
+  
   
   flow <- filter(flow, datetime >= start_date & datetime <= end_date)
   print(paste0("Flow Data Filtered: ", nrow(flow), " rows"))
