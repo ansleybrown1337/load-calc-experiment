@@ -1,14 +1,17 @@
 # load-calc-experiment
 # Script to calculate water analyte loads and showcase limitations of methods used
+# Updated:
+#   - robust ISCO flow import (variable header length)
+#   - optional volume estimation from avg_flow_gpm when volume_gal is missing/NA
+#   - Plotly helper for interactive flow review + bottle-colored sample-event markers
+#   - Fe/Se unit normalization: WQ for Fe/Se assumed ug/L, converted to mg/L before load calc
+#
+# IMPORTANT: All loads are returned in kg (for all analytes, including Fe/Se).
 
 # Load required libraries
 library(dplyr)
 library(tidyr)
 library(lubridate)
-
-# TODO
-#   - integrate LCS flow data types for import
-#   - integrate user-based time aggregation in final function
 
 # ============================ ANALYTE ABBREVIATION DICTIONARY ============================
 
@@ -20,10 +23,18 @@ analyteAbbr.dict <- list(
   "TDS"   = c("Total Dissolved Solids (Residue, Filterable)"),
   "NO3_N" = c("Nitrogen, Nitrate (As N)", "NITRATE AS N"),
   "TSS"   = c("Suspended Solids (Residue, Non-Filterable)", "TSS"),
-  "Fe (g not kg)"    = c("Iron, Total"),
-  "Se (g not kg)"    = c("Selenium, Total", "SELENIUM"),
+  # Standard abbreviations (loads are computed in kg for all analytes)
+  "Fe"    = c("Iron, Total"),
+  "Se"    = c("Selenium, Total", "SELENIUM"),
   "pH"    = c("pH", "POTENTIAL HYDROGEN"),
   "EC25"  = c("Specific Conductance", "ELECTRICAL CONDUCTIVITY")
+)
+
+# Backward compatibility: if older scripts expect these labels in outputs,
+# you can translate them externally; internally we standardize to Fe/Se.
+legacy_analyte_label_map <- c(
+  "Fe (g not kg)" = "Fe",
+  "Se (g not kg)" = "Se"
 )
 
 # ============================ SMALL HELPERS ============================
@@ -38,13 +49,27 @@ clean_numeric <- function(x) {
 parse_result_to_numeric_nd_as_zero <- function(x) {
   x_chr <- trimws(as.character(x))
   is_lt <- grepl("^<", x_chr)
-  # strip leading "<" then coerce
-  mdls  <- suppressWarnings(as.numeric(sub("^<", "", x_chr)))
   nums  <- suppressWarnings(as.numeric(x_chr))
   out   <- ifelse(is_lt, 0, nums)      # <MDL -> 0
-  # common ND tokens -> 0
   out[grepl("^\\s*(ND|nd|non[- ]?detect(ed)?|n/?d)\\s*$", x_chr)] <- 0
   out[!is.finite(out)] <- NA_real_
+  out
+}
+
+# Normalize analyte abbreviations (e.g., legacy labels -> standard)
+normalize_analyte_abbr <- function(x) {
+  x_chr <- as.character(x)
+  x_chr <- ifelse(x_chr %in% names(legacy_analyte_label_map), legacy_analyte_label_map[x_chr], x_chr)
+  x_chr
+}
+
+# Convert result units for specific analytes:
+# - Fe and Se are assumed to be reported as ug/L in the WQ file.
+# - Convert ug/L -> mg/L by dividing by 1000 so that load calculation remains mg/L * L / 1e6 = kg.
+normalize_wq_units_to_mgL <- function(result, analyte_abbr) {
+  out <- result
+  is_fe_se <- analyte_abbr %in% c("Fe", "Se")
+  out[is_fe_se & is.finite(out)] <- out[is_fe_se & is.finite(out)] / 1000
   out
 }
 
@@ -56,9 +81,35 @@ import_wq_data <- function(file_path) {
   read.csv(file_path, stringsAsFactors = TRUE)
 }
 
-## Flow Data
+## Flow Data (ROBUST)
+# Many ISCO exports include a variable-length header. This reader:
+#   1) reads the full file without assuming a fixed skip,
+#   2) detects the first row where col1 parses as m/d/Y H:M,
+#   3) returns the table portion (still header = FALSE).
+import_flow_data_flex <- function(file_path, tz = "UTC") {
+  raw <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE, check.names = FALSE)
+
+  if (ncol(raw) < 2) stop("Flow file appears to have <2 columns. Check delimiter / file.", call. = FALSE)
+
+  dt_try <- suppressWarnings(as.POSIXct(raw[[1]], format = "%m/%d/%Y %H:%M", tz = tz))
+  first_data_row <- which(!is.na(dt_try))[1]
+
+  if (is.na(first_data_row)) {
+    stop(
+      paste0(
+        "Could not find any rows whose first column parses as '%m/%d/%Y %H:%M'. ",
+        "This may not be an ISCO flow export, or the datetime format differs."
+      ),
+      call. = FALSE
+    )
+  }
+
+  raw[first_data_row:nrow(raw), , drop = FALSE]
+}
+
+# Backward-compatible alias
 import_flow_data <- function(file_path) {
-  read.csv(file_path, skip = 7, header = FALSE, stringsAsFactors = FALSE)
+  import_flow_data_flex(file_path, tz = "UTC")
 }
 
 # ============================ PROCESS DATA ============================
@@ -67,25 +118,28 @@ import_flow_data <- function(file_path) {
 process_wq_data <- function(wq_data, treatment_filter) {
   wq_data %>%
     mutate(
-      # Robust timestamp parsing, e.g. '30 May 2024 09:35'
       collected = as.POSIXct(parse_date_time(
         collected, orders = c("mdY HM","mdY","Ymd HMS","Ymd","d b Y HM")
       ), tz = "UTC"),
       received = as.POSIXct(parse_date_time(
         received, orders = c("mdY HM","mdY","Ymd HMS","Ymd","d b Y HM")
       ), tz = "UTC"),
-      
+
       treatment.name = as.character(treatment.name),
-      
-      # Map to analyte abbreviations
+
       analyte_abbr = vapply(analyte, function(a) {
         match <- names(analyteAbbr.dict)[sapply(analyteAbbr.dict, function(x) a %in% x)]
         if (length(match) == 0) NA_character_ else match
       }, FUN.VALUE = character(1)),
-      
-      # Convert results to numeric with ND handling
-      # NOTE: ND and "<MDL" values are treated as ZERO by request
-      result = parse_result_to_numeric_nd_as_zero(result)
+
+      # Convert results to numeric with ND handling (ND and "<MDL" -> 0)
+      result = parse_result_to_numeric_nd_as_zero(result),
+
+      # Standardize analyte_abbr labels (handles any legacy labels)
+      analyte_abbr = normalize_analyte_abbr(analyte_abbr),
+
+      # Unit normalization to mg/L for load calc consistency
+      result = normalize_wq_units_to_mgL(result, analyte_abbr)
     ) %>%
     {
       if (all(is.na(.$treatment.name))) {
@@ -103,46 +157,90 @@ process_wq_data <- function(wq_data, treatment_filter) {
     }
 }
 
-## Process Flow Data
-process_flow_data <- function(flow_data) {
+## Process Flow Data (ROBUST)
+# Handles common ISCO 6- and 8-column exports after header-stripping.
+# If volume_gal is missing or entirely NA within the filtered window, we estimate incremental volume
+# from avg_flow_gpm and the logging interval.
+process_flow_data_flex <- function(flow_data, tz = "UTC") {
   num_columns <- ncol(flow_data)
-  
+
   if (num_columns == 8) {
-    column_names <- c("datetime","min_flow_gpm","min_time","max_flow_gpm",
+    column_names <- c("datetime","min_flow_raw","min_time","max_flow_gpm",
                       "max_time","avg_flow_gpm","volume_gal","sample_event")
   } else if (num_columns == 6) {
-    column_names <- c("datetime","min_flow_gpm","max_flow_gpm",
+    column_names <- c("datetime","min_flow_raw","max_flow_gpm",
                       "avg_flow_gpm","volume_gal","sample_event")
   } else {
-    stop("Unexpected number of columns in flow data: ", num_columns)
+    stop(
+      paste0(
+        "Unexpected number of columns in flow data: ", num_columns, ". ",
+        "This usually means you passed the wrong file, or the export format differs."
+      ),
+      call. = FALSE
+    )
   }
-  
-  flow_data %>%
+
+  out <- flow_data %>%
     setNames(column_names) %>%
     mutate(
-      # parse timestamp
-      datetime = as.POSIXct(datetime, format = "%m/%d/%Y %H:%M", tz = "UTC"),
-      # clean and coerce numerics
+      datetime = as.POSIXct(datetime, format = "%m/%d/%Y %H:%M", tz = tz),
       across(
-        intersect(c("min_flow_gpm","max_flow_gpm","avg_flow_gpm","volume_gal","sample_event"), names(.)),
+        intersect(c("min_flow_raw","max_flow_gpm","avg_flow_gpm","volume_gal","sample_event"), names(.)),
         clean_numeric
-      ),
-      # liters from gallons if available
-      volume_L = if ("volume_gal" %in% names(.)) volume_gal * 3.78541 else NA_real_
-    ) %>%
-    { if ("min_time" %in% names(.))
-      mutate(., min_time = as.POSIXct(paste(as.Date(datetime), min_time),
-                                      format = "%Y-%m-%d %I:%M:%S %p", tz = "UTC"))
-      else . } %>%
-    { if ("max_time" %in% names(.))
-      mutate(., max_time = as.POSIXct(paste(as.Date(datetime), max_time),
-                                      format = "%Y-%m-%d %I:%M:%S %p", tz = "UTC"))
-      else . }
+      )
+    )
+
+  if ("min_time" %in% names(out)) {
+    out <- out %>%
+      mutate(min_time = as.POSIXct(paste(as.Date(datetime), min_time),
+                                   format = "%Y-%m-%d %I:%M:%S %p", tz = tz))
+  }
+  if ("max_time" %in% names(out)) {
+    out <- out %>%
+      mutate(max_time = as.POSIXct(paste(as.Date(datetime), max_time),
+                                   format = "%Y-%m-%d %I:%M:%S %p", tz = tz))
+  }
+
+  # Back-compat: downstream expects min_flow_gpm
+  if (!("min_flow_gpm" %in% names(out))) {
+    out <- out %>% mutate(min_flow_gpm = if ("min_flow_raw" %in% names(out)) min_flow_raw else NA_real_)
+  }
+
+  # Estimate volume_gal if missing or entirely NA
+  need_est <- (!("volume_gal" %in% names(out))) || all(is.na(out$volume_gal))
+  if (need_est) {
+    ok <- is.finite(out$avg_flow_gpm) & !is.na(out$datetime)
+    dt_ok <- out$datetime[ok]
+
+    if (length(dt_ok) >= 2) {
+
+      delta_mins <- as.numeric(difftime(dplyr::lead(out$datetime), out$datetime, units = "mins"))
+
+      diffs <- as.numeric(difftime(dt_ok[-1], dt_ok[-length(dt_ok)], units = "mins"))
+      diffs <- diffs[is.finite(diffs) & diffs > 0]
+      med_step <- if (length(diffs) > 0) stats::median(diffs) else 5
+
+      delta_mins[!is.finite(delta_mins) | delta_mins <= 0] <- med_step
+
+      out$volume_gal <- out$avg_flow_gpm * delta_mins
+    } else {
+      out$volume_gal <- NA_real_
+    }
+  }
+
+  out <- out %>%
+    mutate(volume_L = ifelse(is.finite(volume_gal), volume_gal * 3.78541, NA_real_))
+
+  out
+}
+
+# Backward-compatible name
+process_flow_data <- function(flow_data) {
+  process_flow_data_flex(flow_data, tz = "UTC")
 }
 
 # ============================ AGGREGATE FLOW DATA ============================
 
-## Aggregate Flow Data (Default: 4-hour interval)
 aggregate_flow_data <- function(flow_data, user_interval = 4) {
   flow_data %>%
     mutate(
@@ -159,7 +257,7 @@ aggregate_flow_data <- function(flow_data, user_interval = 4) {
       } else {
         NA_real_
       },
-      sample_event = sum(sample_event, na.rm = TRUE),
+      sample_event = if ("sample_event" %in% names(flow_data)) sum(sample_event, na.rm = TRUE) else NA_real_,
       min_flow_gpm = if ("min_flow_gpm" %in% names(flow_data) && any(!is.na(flow_data$min_flow_gpm))) {
         suppressWarnings(min(min_flow_gpm, na.rm = TRUE))
       } else {
@@ -193,45 +291,15 @@ compute_analyte_summary <- function(wq_data) {
     lapply(function(df) list(avg = df$avg_result, sd = df$sd_result))
 }
 
-# -------- PROTOTYPE (not used): Flow-Weighted Mean Concentrations (FWMC) --------
-# This is a prototype; not wired into run_load_analysis() to avoid any change in behavior.
-align_wq_to_flow_prototype <- function(wq, flow_agg, max_diff_mins = 120) {
-  # nearest join within tolerance
-  idx <- sapply(wq$collected, function(t) {
-    if (is.na(t)) return(NA_integer_)
-    which.min(abs(difftime(flow_agg$time_block, t, units = "mins")))
-  })
-  nearest <- ifelse(is.na(idx), NA, flow_agg$time_block[pmin(pmax(idx, 1L), nrow(flow_agg))])
-  ok <- !is.na(nearest) &
-    abs(difftime(nearest, wq$collected, units = "mins")) <= max_diff_mins
-  wq$time_block <- as.POSIXct(NA, tz = "UTC", origin = "1970-01-01")
-  wq$time_block[ok] <- nearest[ok]
-  dplyr::filter(wq, !is.na(time_block))
-}
-
-compute_analyte_summary_fwmc_prototype <- function(wq_aligned, flow_agg) {
-  dplyr::left_join(wq_aligned, flow_agg[, c("time_block","volume_L")], by = "time_block") %>%
-    group_by(analyte_abbr) %>%
-    summarise(
-      avg = sum(result * volume_L, na.rm = TRUE) / sum(volume_L, na.rm = TRUE),
-      sd  = sd(result, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    split(.$analyte_abbr) %>%
-    lapply(function(df) list(avg = df$avg, sd = df$sd))
-}
-# -------- END PROTOTYPE --------
-
 # ============================ LOAD CALCULATION ============================
 
-## Compute Load for a Given Analyte
 compute_load <- function(analyte_obj, analyte_name, flow_data) {
   if (!analyte_name %in% names(analyte_obj)) return(NA)
-  
-  avg_conc     <- analyte_obj[[analyte_name]]$avg
-  sd_conc      <- analyte_obj[[analyte_name]]$sd
-  total_volume <- sum(flow_data$volume_L, na.rm = TRUE)
-  
+
+  avg_conc     <- analyte_obj[[analyte_name]]$avg   # mg/L (Fe/Se already converted from ug/L)
+  sd_conc      <- analyte_obj[[analyte_name]]$sd    # mg/L
+  total_volume <- sum(flow_data$volume_L, na.rm = TRUE)  # L
+
   if (!is.finite(total_volume) || total_volume <= 0) {
     warning("Total flow volume is non-finite or <= 0; loads returned as NA for analyte: ", analyte_name)
     return(data.frame(
@@ -239,27 +307,26 @@ compute_load <- function(analyte_obj, analyte_name, flow_data) {
       load_kg = NA_real_, load_upper_kg = NA_real_, load_lower_kg = NA_real_
     ))
   }
-  
+
   upper <- (avg_conc + sd_conc)
-  lower <- pmax(0, avg_conc - sd_conc)  # clamp lower bound to zero
-  
+  lower <- pmax(0, avg_conc - sd_conc)
+
   data.frame(
     analyte        = analyte_name,
-    load_kg        = avg_conc * total_volume / 1e6,
+    load_kg        = avg_conc * total_volume / 1e6,   # (mg/L * L) -> mg ; /1e6 -> kg
     load_upper_kg  = upper    * total_volume / 1e6,
     load_lower_kg  = lower    * total_volume / 1e6
   )
 }
 
-## Compute Loads for All Analytes (exclude EC25/pH + status message)
 compute_all_loads <- function(analyte_obj, flow_data, drop_analytes = c("EC25", "pH")) {
   analyte_names <- setdiff(names(analyte_obj), drop_analytes)
-  
+
   if (length(drop_analytes) > 0) {
     message("Note: The following analytes were excluded from load calculations because they are not mass-based: ",
             paste(drop_analytes, collapse = ", "))
   }
-  
+
   if (length(analyte_names) == 0) {
     return(dplyr::tibble(
       analyte = character(),
@@ -268,25 +335,22 @@ compute_all_loads <- function(analyte_obj, flow_data, drop_analytes = c("EC25", 
       load_lower_kg = double()
     ))
   }
-  
+
   loads <- lapply(analyte_names, function(analyte) {
     compute_load(analyte_obj, analyte, flow_data)
   })
-  
+
   dplyr::bind_rows(loads)
 }
 
 # ============================ RUN LOAD ANALYSIS FUNCTION ============================
 
-# Warn if multiple sampling dates are present in the filtered WQ
 warn_if_multiple_sampling_events <- function(wq_df, enable = TRUE) {
   if (!enable || nrow(wq_df) == 0 || !"collected" %in% names(wq_df)) return(invisible(NULL))
-  # collapse to date (not datetime) so dup samples on same day don't count as separate events
   dates <- as.Date(wq_df$collected)
-  dates <- dates[is.finite(as.numeric(dates))]  # drop NA dates quietly
+  dates <- dates[is.finite(as.numeric(dates))]
   uniq <- sort(unique(dates))
   if (length(uniq) > 1) {
-    # counts by date for context
     counts <- sort(table(dates))
     warning(
       paste0(
@@ -301,67 +365,54 @@ warn_if_multiple_sampling_events <- function(wq_df, enable = TRUE) {
   invisible(NULL)
 }
 
+run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
+                             treatment_filter = "Outflow", user_interval = 4) {
 
-run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatment_filter = "Outflow", user_interval = 4) {
-  
-  # ============================ IMPORT & PROCESS DATA ============================
-  
-  ## Import Data
   wq_raw   <- import_wq_data(wq_file)
   print(paste0("WQ Data Imported: ", nrow(wq_raw), " rows"))
-  flow_raw <- import_flow_data(flow_file)
+
+  flow_raw <- import_flow_data_flex(flow_file, tz = "UTC")
   print(paste0("Flow Data Imported: ", nrow(flow_raw), " rows"))
-  
-  ## Process Data (now allows user-specified treatment)
+
   wq   <- process_wq_data(wq_raw, treatment_filter)
   print("WQ Data Processed")
-  flow <- process_flow_data(flow_raw)
+
+  flow <- process_flow_data_flex(flow_raw, tz = "UTC")
   print("Flow Data Processed")
-  
-  ## Filter Data to Date Range
-  # aj note 10 feb 2024: doesn't filter well if NAs present in dates
-  start_date <- as.POSIXct(start_date, tz = "UTC")
+
+  start_date <- as.POSIXct(trimws(start_date), tz = "UTC")
   print(paste0("Start Date: ", start_date))
-  end_date <- as.POSIXct(end_date, tz = "UTC")
+  end_date <- as.POSIXct(trimws(end_date), tz = "UTC")
   print(paste0("End Date: ", end_date))
-  
-  wq   <- filter(wq, collected >= start_date & collected <= end_date)
+
+  wq <- filter(wq, collected >= start_date & collected <= end_date)
   print(paste0("WQ Data Filtered: ", nrow(wq), " rows"))
   if (nrow(wq) == 0) {
     warning("No WQ data found in the selected time frame. Check your treatment filter and date range.")
   }
-  # Inform user if multiple sampling dates will be averaged
   warn_if_multiple_sampling_events(wq, enable = TRUE)
-  
-  
+
   flow <- filter(flow, datetime >= start_date & datetime <= end_date)
   print(paste0("Flow Data Filtered: ", nrow(flow), " rows"))
   if (nrow(flow) == 0) {
-    warning("No flow data found in the selected time frame. Check your treatment filter and date range.")
+    warning("No flow data found in the selected time frame. Check your date range.")
   }
-  
-  ## Aggregate Flow Data
+
   flow_aggregated <- aggregate_flow_data(flow, user_interval = user_interval)
   print(paste0("Flow Data Aggregated: ", nrow(flow_aggregated), " rows"))
   flow_sum <- sum(flow_aggregated$volume_L, na.rm = TRUE)
   print(paste0("Total Volume, L: ", flow_sum, " | Gallons: ", flow_sum * 0.264172))
-  
-  # ============================ ANALYTE PROCESSING ============================
-  
-  ## Compute Analyte Summary (mean & SD for each analyte)
+
   analyte_summary <- compute_analyte_summary(wq)
-  
-  ## Compute Loads for All Analytes (excludes EC25/pH internally)
   all_loads <- compute_all_loads(analyte_summary, flow_aggregated)
-  
-  ## Always print a status line about exclusions + final analytes shown
+
   print("Excluded non-mass analytes from load calc: EC25, pH")
   if (nrow(all_loads) > 0) {
     print(paste0("Final analytes in load table: ", paste(all_loads$analyte, collapse = ", ")))
   } else {
     print("Final analytes in load table: <none>")
   }
-  
+
   return(list(volume = flow_sum, loads = all_loads))
 }
 
@@ -370,13 +421,11 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date, treatmen
 sum_load_objects <- function(...) {
   load_objects <- list(...)
   total_volume <- sum(sapply(load_objects, function(obj) obj$volume), na.rm = TRUE)
-  
-  # Extract original analyte order from the first load object
+
   original_order <- load_objects[[1]]$loads$analyte
-  
-  # Combine & sum
+
   combined_loads <- bind_rows(lapply(load_objects, function(obj) obj$loads))
-  
+
   total_loads <- combined_loads %>%
     group_by(analyte) %>%
     summarise(
@@ -386,49 +435,205 @@ sum_load_objects <- function(...) {
       .groups = "drop"
     ) %>%
     arrange(factor(analyte, levels = original_order))
-  
+
   list(volume = total_volume, loads = total_loads)
 }
 
 # ================== CONVERT LOAD TO SPATIAL UNITS ============================
 
 convert_load_to_spatial <- function(load_object, acreage) {
-  
-  # Conversion factors
-  L_to_acre_ft <- 8.10714e-7  # 1 liter = 8.10714e-7 acre-feet
-  kg_to_lbs    <- 2.20462     # 1 kg = 2.20462 lbs
-  g_to_lbs     <- 0.00220462  # 1 g = 0.00220462 lbs
-  
-  # Convert volume to acre-feet
+
+  L_to_acre_ft <- 8.10714e-7
+  kg_to_lbs    <- 2.20462
+
   volume_acre_ft <- load_object$volume * L_to_acre_ft
-  
-  # Convert loads to lbs and lbs/acre
+
   converted_loads <- load_object$loads %>%
     mutate(
-      load_lbs = ifelse(
-        analyte %in% c("Fe (g not kg)", "Se (g not kg)"),
-        load_kg * g_to_lbs,  # g -> lbs
-        load_kg * kg_to_lbs  # kg -> lbs
-      ),
-      load_upper_lbs = ifelse(
-        analyte %in% c("Fe (g not kg)", "Se (g not kg)"),
-        load_upper_kg * g_to_lbs,
-        load_upper_kg * kg_to_lbs
-      ),
-      load_lower_lbs = ifelse(
-        analyte %in% c("Fe (g not kg)", "Se (g not kg)"),
-        load_lower_kg * g_to_lbs,
-        load_lower_kg * kg_to_lbs
-      ),
+      load_lbs       = load_kg       * kg_to_lbs,
+      load_upper_lbs = load_upper_kg * kg_to_lbs,
+      load_lower_lbs = load_lower_kg * kg_to_lbs,
       lbs_acre       = load_lbs       / acreage,
       upper_lbs_acre = load_upper_lbs / acreage,
       lower_lbs_acre = load_lower_lbs / acreage
     ) %>%
     select(analyte, load_lbs, load_upper_lbs, load_lower_lbs,
            lbs_acre, upper_lbs_acre, lower_lbs_acre)
-  
+
   list(
     volume_acre_ft = volume_acre_ft,
     loads = converted_loads
   )
+}
+
+# ============================ PLOTLY FLOW TIMESERIES ============================
+
+plot_avg_flow_timeseries_plotly <- function(flow_file,
+                                            start_date = NULL,
+                                            end_date   = NULL,
+                                            user_interval = NULL,   # NULL = no aggregation, else hours
+                                            tz = "UTC",
+                                            show_flow_sample_events = TRUE,
+                                            sample_event_threshold = 0.5,
+                                            # Optional: overlay WQ sample times
+                                            wq_file = NULL,
+                                            wq_treatment_filter = "Outflow",
+                                            show_wq_samples = TRUE,
+                                            # When sample_event rows have blank flow columns, place markers using nearest valid avg_flow_gpm
+                                            event_match_window_mins = 60) {
+
+  if (!requireNamespace("plotly", quietly = TRUE)) {
+    stop("Package 'plotly' is required. Install it with install.packages('plotly').", call. = FALSE)
+  }
+
+  # Guard against accidentally passing a WQ file as flow_file
+  hdr <- tryCatch(read.csv(flow_file, nrows = 1, stringsAsFactors = FALSE), error = function(e) NULL)
+  if (!is.null(hdr)) {
+    nm <- tolower(names(hdr))
+    if (all(c("analyte", "result") %in% nm) || ("treatment.name" %in% nm) || ("event.type" %in% nm)) {
+      stop(
+        paste0(
+          "That file looks like a WATER QUALITY table, not an ISCO flow export: ", flow_file, "\n",
+          "Pass the flow CSV you use as 'flow_file' in run_load_analysis()."
+        ),
+        call. = FALSE
+      )
+    }
+  }
+
+  if (!is.null(start_date)) start_dt <- as.POSIXct(trimws(start_date), tz = tz) else start_dt <- NULL
+  if (!is.null(end_date))   end_dt   <- as.POSIXct(trimws(end_date), tz = tz)   else end_dt   <- NULL
+
+  flow_raw <- import_flow_data_flex(flow_file, tz = tz)
+  flow     <- process_flow_data_flex(flow_raw, tz = tz)
+
+  if (!is.null(start_dt)) flow <- dplyr::filter(flow, datetime >= start_dt)
+  if (!is.null(end_dt))   flow <- dplyr::filter(flow, datetime <= end_dt)
+
+  if (nrow(flow) == 0) {
+    warning("No flow rows found after filtering. Nothing to plot.", call. = FALSE)
+    return(invisible(NULL))
+  }
+
+  line_df <- flow
+  x_col <- "datetime"
+  if (!is.null(user_interval) && is.finite(user_interval) && user_interval > 0) {
+    line_df <- aggregate_flow_data(flow, user_interval = user_interval)
+    x_col <- "time_block"
+  }
+
+  p <- plotly::plot_ly(
+    data = line_df,
+    x = ~ .data[[x_col]],
+    y = ~ avg_flow_gpm,
+    type = "scatter",
+    mode = "lines",
+    name = "avg_flow_gpm",
+    hovertemplate = paste(
+      "Time: %{x}",
+      "<br>Avg flow (gpm): %{y:.2f}",
+      "<extra></extra>"
+    )
+  )
+
+  # Flow sample_event markers (raw flow only)
+  if (isTRUE(show_flow_sample_events) && ("sample_event" %in% names(flow))) {
+
+    ev <- dplyr::filter(flow, is.finite(sample_event) & sample_event >= sample_event_threshold)
+
+    if (nrow(ev) > 0) {
+
+      flow_valid <- dplyr::filter(flow, is.finite(avg_flow_gpm))
+
+      ev$avg_flow_gpm_marker <- ev$avg_flow_gpm
+
+      if (nrow(flow_valid) > 0) {
+
+        idx <- vapply(ev$datetime, function(t) {
+          j <- which.min(abs(as.numeric(difftime(flow_valid$datetime, t, units = "mins"))))
+          if (length(j) == 0) return(NA_integer_)
+          if (abs(as.numeric(difftime(flow_valid$datetime[j], t, units = "mins"))) > event_match_window_mins) return(NA_integer_)
+          j
+        }, FUN.VALUE = integer(1))
+
+        ok <- !is.na(idx)
+        needs_y <- !is.finite(ev$avg_flow_gpm_marker)
+        fill_ok <- ok & needs_y
+        ev$avg_flow_gpm_marker[fill_ok] <- flow_valid$avg_flow_gpm[idx[fill_ok]]
+      }
+
+      ev_plot <- dplyr::filter(ev, is.finite(avg_flow_gpm_marker)) %>%
+        dplyr::mutate(bottle = as.factor(sample_event))
+
+      if (nrow(ev_plot) > 0) {
+        for (b in sort(unique(ev_plot$bottle))) {
+          dfb <- dplyr::filter(ev_plot, bottle == b)
+
+          p <- p %>% plotly::add_trace(
+            data = dfb,
+            x = ~ datetime,
+            y = ~ avg_flow_gpm_marker,
+            type = "scatter",
+            mode = "markers",
+            name = paste("Bottle", as.character(b)),
+            hovertemplate = paste(
+              "Time: %{x}",
+              "<br>Avg flow (gpm): %{y:.2f}",
+              "<br>Bottle: %{text}",
+              "<extra></extra>"
+            ),
+            text = ~ as.character(sample_event),
+            inherit = FALSE
+          )
+        }
+      }
+    }
+  }
+
+  # Optional WQ sample time overlay
+  if (!is.null(wq_file) && isTRUE(show_wq_samples)) {
+
+    wq_raw <- import_wq_data(wq_file)
+    wq <- process_wq_data(wq_raw, wq_treatment_filter)
+
+    if (!is.null(start_dt)) wq <- dplyr::filter(wq, collected >= start_dt)
+    if (!is.null(end_dt))   wq <- dplyr::filter(wq, collected <= end_dt)
+
+    if (nrow(wq) > 0) {
+      wq_times <- wq %>%
+        dplyr::filter(!is.na(collected)) %>%
+        dplyr::distinct(collected) %>%
+        dplyr::arrange(collected)
+
+      p <- p %>% plotly::add_trace(
+        data = wq_times,
+        x = ~ collected,
+        y = 0,
+        type = "scatter",
+        mode = "markers",
+        name = "WQ collected",
+        marker = list(symbol = "x", size = 9),
+        hovertemplate = paste(
+          "WQ collected: %{x}",
+          "<extra></extra>"
+        ),
+        inherit = FALSE
+      )
+    }
+  }
+
+  p <- p %>% plotly::layout(
+    title = "Average flow (gpm) time series",
+    xaxis = list(
+      title = "Time",
+      rangeslider = list(visible = TRUE)
+    ),
+    yaxis = list(title = "avg_flow_gpm"),
+    hovermode = "x unified"
+  )
+
+  print(p)
+
+  attr(flow, "line_df") <- line_df
+  invisible(flow)
 }
