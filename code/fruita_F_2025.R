@@ -133,7 +133,6 @@ total_F4$volume
 total_F4$loads
 
 # convert to spatial units
-# Assume we have a load object and field size of 50 acres
 spatial_loads_F1 <- convert_load_to_spatial(total_F1, acreage = 13.2)
 spatial_loads_F2 <- convert_load_to_spatial(total_F2, acreage = 12.9)
 spatial_loads_F3 <- convert_load_to_spatial(total_F3, acreage = 13.1)
