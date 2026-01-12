@@ -76,30 +76,34 @@ import_wq_data <- function(file_path) {
 }
 
 # Robust ISCO flow import: auto-detect first datetime row, then return table portion
-import_flow_data_flex <- function(file_path, tz = "UTC") {
+import_flow_data_flex <- function(file_path, tz = "America/Denver") {
   raw <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE, check.names = FALSE)
-
+  
   if (ncol(raw) < 2) stop("Flow file appears to have <2 columns. Check delimiter / file.", call. = FALSE)
-
-  dt_try <- suppressWarnings(as.POSIXct(raw[[1]], format = "%m/%d/%Y %H:%M", tz = tz))
+  
+  dt_try <- suppressWarnings(lubridate::parse_date_time(
+    raw[[1]],
+    orders = c("mdY HMS p", "mdY HM p", "mdY HMS", "mdY HM"),
+    tz = tz
+  ))
+  
   first_data_row <- which(!is.na(dt_try))[1]
-
+  
   if (is.na(first_data_row)) {
     stop(
       paste0(
-        "Could not find any rows whose first column parses as '%m/%d/%Y %H:%M'. ",
-        "This may not be an ISCO flow export, or the datetime format differs."
+        "Could not find any rows whose first column parses as a datetime. ",
+        "Expected something like 'm/d/Y h:m:s AM/PM' or 'm/d/Y H:M[:S]'."
       ),
       call. = FALSE
     )
   }
-
+  
   raw[first_data_row:nrow(raw), , drop = FALSE]
 }
-
 # Backward-compatible alias
 import_flow_data <- function(file_path) {
-  import_flow_data_flex(file_path, tz = "UTC")
+  import_flow_data_flex(file_path, tz = "America/Denver")
 }
 
 # ============================ PROCESS DATA ============================
@@ -109,10 +113,10 @@ process_wq_data <- function(wq_data, treatment_filter) {
     mutate(
       collected = as.POSIXct(parse_date_time(
         collected, orders = c("mdY HM","mdY","Ymd HMS","Ymd","d b Y HM")
-      ), tz = "UTC"),
+      ), tz = "America/Denver"),
       received = as.POSIXct(parse_date_time(
         received, orders = c("mdY HM","mdY","Ymd HMS","Ymd","d b Y HM")
-      ), tz = "UTC"),
+      ), tz = "America/Denver"),
 
       treatment.name = as.character(treatment.name),
 
@@ -142,9 +146,9 @@ process_wq_data <- function(wq_data, treatment_filter) {
     }
 }
 
-process_flow_data_flex <- function(flow_data, tz = "UTC") {
+process_flow_data_flex <- function(flow_data, tz = "America/Denver") {
   num_columns <- ncol(flow_data)
-
+  
   if (num_columns == 8) {
     column_names <- c("datetime","min_flow_raw","min_time","max_flow_gpm",
                       "max_time","avg_flow_gpm","volume_gal","sample_event")
@@ -160,58 +164,67 @@ process_flow_data_flex <- function(flow_data, tz = "UTC") {
       call. = FALSE
     )
   }
-
+  
   out <- flow_data %>%
     setNames(column_names) %>%
     mutate(
-      datetime = as.POSIXct(datetime, format = "%m/%d/%Y %H:%M", tz = tz),
+      datetime = suppressWarnings(lubridate::parse_date_time(
+        datetime,
+        orders = c("mdY HMS p", "mdY HM p", "mdY HMS", "mdY HM"),
+        tz = tz
+      )),
       across(
         intersect(c("min_flow_raw","max_flow_gpm","avg_flow_gpm","volume_gal","sample_event"), names(.)),
         clean_numeric
       )
-    )
-
+    ) %>%
+    # Critical: enforce time order to prevent Plotly “looping”
+    arrange(datetime)
+  
   if ("min_time" %in% names(out)) {
     out <- out %>%
-      mutate(min_time = as.POSIXct(paste(as.Date(datetime), min_time),
-                                   format = "%Y-%m-%d %I:%M:%S %p", tz = tz))
+      mutate(min_time = as.POSIXct(
+        paste(as.Date(datetime), min_time),
+        format = "%Y-%m-%d %I:%M:%S %p", tz = tz
+      ))
   }
   if ("max_time" %in% names(out)) {
     out <- out %>%
-      mutate(max_time = as.POSIXct(paste(as.Date(datetime), max_time),
-                                   format = "%Y-%m-%d %I:%M:%S %p", tz = tz))
+      mutate(max_time = as.POSIXct(
+        paste(as.Date(datetime), max_time),
+        format = "%Y-%m-%d %I:%M:%S %p", tz = tz
+      ))
   }
-
+  
   if (!("min_flow_gpm" %in% names(out))) {
     out <- out %>% mutate(min_flow_gpm = if ("min_flow_raw" %in% names(out)) min_flow_raw else NA_real_)
   }
-
-  # Estimate volume_gal if missing or entirely NA
+  
+  # (keep your existing volume estimation logic here unchanged, if present)
   need_est <- (!("volume_gal" %in% names(out))) || all(is.na(out$volume_gal))
   if (need_est) {
     ok <- is.finite(out$avg_flow_gpm) & !is.na(out$datetime)
     dt_ok <- out$datetime[ok]
-
+    
     if (length(dt_ok) >= 2) {
       delta_mins <- as.numeric(difftime(dplyr::lead(out$datetime), out$datetime, units = "mins"))
-
+      
       diffs <- as.numeric(difftime(dt_ok[-1], dt_ok[-length(dt_ok)], units = "mins"))
       diffs <- diffs[is.finite(diffs) & diffs > 0]
-      med_step <- if (length(diffs) > 0) stats::median(diffs) else 5
-
+      med_step <- if (length(diffs) > 0) stats::median(diffs) else 15
+      
       delta_mins[!is.finite(delta_mins) | delta_mins <= 0] <- med_step
       out$volume_gal <- out$avg_flow_gpm * delta_mins
     } else {
       out$volume_gal <- NA_real_
     }
   }
-
-  out %>%
-    mutate(volume_L = ifelse(is.finite(volume_gal), volume_gal * 3.78541, NA_real_))
+  
+  out %>% mutate(volume_L = ifelse(is.finite(volume_gal), volume_gal * 3.78541, NA_real_))
 }
 
 process_flow_data <- function(flow_data) {
-  process_flow_data_flex(flow_data, tz = "UTC")
+  process_flow_data_flex(flow_data, tz = "America/Denver")
 }
 
 # ============================ AGGREGATE FLOW DATA ============================
@@ -221,7 +234,7 @@ aggregate_flow_data <- function(flow_data, user_interval = 4) {
     mutate(
       time_block = as.POSIXct(
         floor(as.numeric(datetime) / (user_interval * 3600)) * (user_interval * 3600),
-        origin = "1970-01-01", tz = "UTC"
+        origin = "1970-01-01", tz = "America/Denver"
       )
     ) %>%
     group_by(time_block) %>%
@@ -388,19 +401,19 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
   wq_raw   <- import_wq_data(wq_file)
   print(paste0("WQ Data Imported: ", nrow(wq_raw), " rows"))
 
-  flow_raw <- import_flow_data_flex(flow_file, tz = "UTC")
+  flow_raw <- import_flow_data_flex(flow_file, tz = "America/Denver")
   print(paste0("Flow Data Imported: ", nrow(flow_raw), " rows"))
 
   wq   <- process_wq_data(wq_raw, treatment_filter)
   print("WQ Data Processed")
 
-  flow <- process_flow_data_flex(flow_raw, tz = "UTC")
+  flow <- process_flow_data_flex(flow_raw, tz = "America/Denver")
   print("Flow Data Processed")
 
   # Accepts either "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" (seconds ok too)
-  start_date <- as.POSIXct(trimws(start_date), tz = "UTC")
+  start_date <- as.POSIXct(trimws(start_date), tz = "America/Denver")
   print(paste0("Start Date: ", start_date))
-  end_date <- as.POSIXct(trimws(end_date), tz = "UTC")
+  end_date <- as.POSIXct(trimws(end_date), tz = "America/Denver")
   print(paste0("End Date: ", end_date))
 
   wq <- filter(wq, collected >= start_date & collected <= end_date)
@@ -503,18 +516,34 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
                                             start_date = NULL,
                                             end_date   = NULL,
                                             user_interval = NULL,   # NULL = no aggregation, else hours
-                                            tz = "UTC",
+                                            tz = "America/Denver",
+                                            flow_units = c("gpm", "cfs", "L/s"),
                                             show_flow_sample_events = TRUE,
                                             sample_event_threshold = 0.5,
                                             wq_file = NULL,
                                             wq_treatment_filter = "Outflow",
                                             show_wq_samples = TRUE,
                                             event_match_window_mins = 60) {
-
+  
   if (!requireNamespace("plotly", quietly = TRUE)) {
     stop("Package 'plotly' is required. Install it with install.packages('plotly').", call. = FALSE)
   }
-
+  
+  flow_units <- match.arg(flow_units)
+  
+  # ---- unit conversion (from gpm) ----
+  # 1 cfs = 448.831 gpm
+  # 1 gpm = 3.78541 L/min = 0.0630901667 L/s
+  conv_factor <- switch(
+    flow_units,
+    "gpm" = 1,
+    "cfs" = 1 / 448.831,
+    "L/s" = 3.78541 / 60
+  )
+  y_title <- switch(flow_units, "gpm" = "Flow (gpm)", "cfs" = "Flow (cfs)", "L/s" = "Flow (L/s)")
+  y_fmt   <- switch(flow_units, "gpm" = ".2f", "cfs" = ".3f", "L/s" = ".2f")
+  
+  # Guard against accidentally passing a WQ file as flow_file
   hdr <- tryCatch(read.csv(flow_file, nrows = 1, stringsAsFactors = FALSE), error = function(e) NULL)
   if (!is.null(hdr)) {
     nm <- tolower(names(hdr))
@@ -528,83 +557,93 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
       )
     }
   }
-
+  
   if (!is.null(start_date)) start_dt <- as.POSIXct(trimws(start_date), tz = tz) else start_dt <- NULL
   if (!is.null(end_date))   end_dt   <- as.POSIXct(trimws(end_date), tz = tz)   else end_dt   <- NULL
-
+  
   flow_raw <- import_flow_data_flex(flow_file, tz = tz)
   flow     <- process_flow_data_flex(flow_raw, tz = tz)
-
+  
   if (!is.null(start_dt)) flow <- dplyr::filter(flow, datetime >= start_dt)
   if (!is.null(end_dt))   flow <- dplyr::filter(flow, datetime <= end_dt)
-
+  
   if (nrow(flow) == 0) {
     warning("No flow rows found after filtering. Nothing to plot.", call. = FALSE)
     return(invisible(NULL))
   }
-
+  
+  # Line layer: optional aggregation
   line_df <- flow
   x_col <- "datetime"
   if (!is.null(user_interval) && is.finite(user_interval) && user_interval > 0) {
     line_df <- aggregate_flow_data(flow, user_interval = user_interval)
     x_col <- "time_block"
   }
-
+  
+  # Add plotting y column in desired units (do not overwrite avg_flow_gpm)
+  line_df <- line_df %>%
+    dplyr::mutate(plot_flow = avg_flow_gpm * conv_factor)
+  
+  # Build base plotly (flow line)
   p <- plotly::plot_ly(
     data = line_df,
     x = ~ .data[[x_col]],
-    y = ~ avg_flow_gpm,
+    y = ~ plot_flow,
     type = "scatter",
     mode = "lines",
-    name = "avg_flow_gpm",
-    hovertemplate = paste(
+    name = paste0("avg_flow_", flow_units),
+    hovertemplate = paste0(
       "Time: %{x}",
-      "<br>Avg flow (gpm): %{y:.2f}",
+      "<br>Avg flow (", flow_units, "): %{y:", y_fmt, "}",
       "<extra></extra>"
     )
   )
-
+  
+  # ---- Flow sample_event markers (raw flow only) ----
   if (isTRUE(show_flow_sample_events) && ("sample_event" %in% names(flow))) {
-
+    
     ev <- dplyr::filter(flow, is.finite(sample_event) & sample_event >= sample_event_threshold)
-
+    
     if (nrow(ev) > 0) {
-
+      
       flow_valid <- dplyr::filter(flow, is.finite(avg_flow_gpm))
       ev$avg_flow_gpm_marker <- ev$avg_flow_gpm
-
+      
       if (nrow(flow_valid) > 0) {
-
+        
         idx <- vapply(ev$datetime, function(t) {
           j <- which.min(abs(as.numeric(difftime(flow_valid$datetime, t, units = "mins"))))
           if (length(j) == 0) return(NA_integer_)
           if (abs(as.numeric(difftime(flow_valid$datetime[j], t, units = "mins"))) > event_match_window_mins) return(NA_integer_)
           j
         }, FUN.VALUE = integer(1))
-
+        
         ok <- !is.na(idx)
         needs_y <- !is.finite(ev$avg_flow_gpm_marker)
         fill_ok <- ok & needs_y
         ev$avg_flow_gpm_marker[fill_ok] <- flow_valid$avg_flow_gpm[idx[fill_ok]]
       }
-
+      
       ev_plot <- dplyr::filter(ev, is.finite(avg_flow_gpm_marker)) %>%
-        dplyr::mutate(bottle = as.factor(sample_event))
-
+        dplyr::mutate(
+          bottle = as.factor(sample_event),
+          plot_flow_marker = avg_flow_gpm_marker * conv_factor
+        )
+      
       if (nrow(ev_plot) > 0) {
         for (b in sort(unique(ev_plot$bottle))) {
           dfb <- dplyr::filter(ev_plot, bottle == b)
-
+          
           p <- p %>% plotly::add_trace(
             data = dfb,
             x = ~ datetime,
-            y = ~ avg_flow_gpm_marker,
+            y = ~ plot_flow_marker,
             type = "scatter",
             mode = "markers",
             name = paste("Bottle", as.character(b)),
-            hovertemplate = paste(
+            hovertemplate = paste0(
               "Time: %{x}",
-              "<br>Avg flow (gpm): %{y:.2f}",
+              "<br>Avg flow (", flow_units, "): %{y:", y_fmt, "}",
               "<br>Bottle: %{text}",
               "<extra></extra>"
             ),
@@ -615,21 +654,22 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
       }
     }
   }
-
+  
+  # ---- Optional: overlay WQ sample times as markers ----
   if (!is.null(wq_file) && isTRUE(show_wq_samples)) {
-
+    
     wq_raw <- import_wq_data(wq_file)
     wq <- process_wq_data(wq_raw, wq_treatment_filter)
-
+    
     if (!is.null(start_dt)) wq <- dplyr::filter(wq, collected >= start_dt)
     if (!is.null(end_dt))   wq <- dplyr::filter(wq, collected <= end_dt)
-
+    
     if (nrow(wq) > 0) {
       wq_times <- wq %>%
         dplyr::filter(!is.na(collected)) %>%
         dplyr::distinct(collected) %>%
         dplyr::arrange(collected)
-
+      
       p <- p %>% plotly::add_trace(
         data = wq_times,
         x = ~ collected,
@@ -646,19 +686,20 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
       )
     }
   }
-
+  
   p <- p %>% plotly::layout(
-    title = "Average flow (gpm) time series",
+    title = "Average flow time series",
     xaxis = list(
       title = "Time",
       rangeslider = list(visible = TRUE)
     ),
-    yaxis = list(title = "avg_flow_gpm"),
+    yaxis = list(title = y_title),
     hovermode = "x unified"
   )
-
+  
   print(p)
-
+  
   attr(flow, "line_df") <- line_df
+  attr(flow, "flow_units") <- flow_units
   invisible(flow)
 }
