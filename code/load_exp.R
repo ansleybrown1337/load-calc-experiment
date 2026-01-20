@@ -429,7 +429,7 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
   print(paste0("Flow Data Aggregated: ", nrow(flow_aggregated), " rows"))
 
   flow_sum <- sum(flow_aggregated$volume_L, na.rm = TRUE)
-  print(paste0("Total Volume, L: ", flow_sum, " | Gallons: ", flow_sum * 0.264172))
+  print(paste0("Total Volume, L: ", flow_sum, " | Gallons: ", flow_sum * 0.264172, " | Acre-ft: ", flow_sum * 8.10714e-7))
 
   analyte_summary <- compute_analyte_summary(wq)
   analyte_summary <- add_total_nitrogen_to_summary(analyte_summary)
