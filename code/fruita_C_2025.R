@@ -60,7 +60,7 @@ F25_irr4C1 <- run_load_analysis(
   user_interval = 1
 )
 
-# Irrigation 5 not processed due to power issues
+# Irrigation 5 sampled but not processed due to C1 power issues
 # F25_irr5C1 <- run_load_analysis(
 #   wq_file = wqpath,
 #   flow_file = flowpath_C1,
@@ -70,7 +70,7 @@ F25_irr4C1 <- run_load_analysis(
 #   user_interval = 1
 # )
 
-# not processed, unsure why
+# Irrigation 6 not sampled, unsure why
 # F25_irr6C1 <- run_load_analysis(
 #   wq_file = wqpath,
 #   flow_file = flowpath_C1,
@@ -82,71 +82,107 @@ F25_irr4C1 <- run_load_analysis(
 
 # ----- Irrigations - C2 -----
 
-F25_irr1C2 <- run_load_analysis(
+# Irrigation 1 - not captured in flow or wq data
+
+# Irrigation 2
+F25_irr2C2 <- run_load_analysis(
   wq_file = wqpath,
   flow_file = flowpath_C2,
-  start_date = "2025-04-10 00:00",
-  end_date = "2025-04-11 10:30",
-  treatment_filter = "Outflow",  # User can now specify treatment!
+  start_date = "2025-05-05 00:00",
+  end_date = "2025-05-07 00:00",
+  treatment_filter = "C2",  # User can now specify treatment!
   user_interval = 1
 )
+
+# Irrigation 3
+F25_irr3C2 <- run_load_analysis(
+  wq_file = wqpath,
+  flow_file = flowpath_C2,
+  start_date = "2025-05-17 12:00",
+  end_date = "2025-05-18 20:00",
+  treatment_filter = "C2",  # User can now specify treatment!
+  user_interval = 1
+)
+
+# Irrigation 4
+F25_irr4C2 <- run_load_analysis(
+  wq_file = wqpath,
+  flow_file = flowpath_C2,
+  start_date = "2025-05-29 10:00",
+  end_date = "2025-05-30 20:00",
+  treatment_filter = "C2",  # User can now specify treatment!
+  user_interval = 1
+)
+
+# Irrigation 5 sampled but not processed due to C1 power issues
+# F25_irr5C2 <- run_load_analysis(
+#   wq_file = wqpath,
+#   flow_file = flowpath_C2,
+#   start_date = "2025-06-10 00:00",
+#   end_date = "2025-06-11 12:00",
+#   treatment_filter = "C2",  # User can now specify treatment!
+#   user_interval = 1
+# )
+
+# Irrigation 6 not sampled, unsure why
+# F25_irr6C2 <- run_load_analysis(
+#   wq_file = wqpath,
+#   flow_file = flowpath_C2,
+#   start_date = "2025-06-21 00:00",
+#   end_date = "2025-06-22 12:00",
+#   treatment_filter = "C2",  # User can now specify treatment!
+#   user_interval = 1
+# )
 
 
 # ----- Summary of Results -----
 
-F25_irr1set1$volume
-F25_irr1set1$loads
-F25_irr1set2$volume
-F25_irr1set2$loads
-F25_irr1set3$volume
-F25_irr1set3$loads
-F25_irr1set4$volume
-F25_irr1set4$loads
+F25_irr1C1$volume
+F25_irr1C1$loads
+F25_irr2C1$volume
+F25_irr2C1$loads
+F25_irr3C1$volume
+F25_irr3C1$loads
+F25_irr4C1$volume
+F25_irr4C1$loads
 
-F25_irr3set1$volume
-F25_irr3set1$loads
-F25_irr3set2$volume
-F25_irr3set2$loads
-F25_irr3set3$volume
-F25_irr3set3$loads
-F25_irr3set4$volume
-F25_irr3set4$loads
+F25_irr2C2$volume
+F25_irr2C2$loads
+F25_irr3C2$volume
+F25_irr3C2$loads
+F25_irr4C2$volume
+F25_irr4C2$loads
 
-# F1: 28-0-0 fertilizer
-total_F1 <- sum_load_objects(F25_irr1set1, F25_irr3set1)
-total_F1$volume
-total_F1$loads
 
-# F2: 28-0-0 fertilizer (same as F1)
-total_F2 <- sum_load_objects(F25_irr1set2, F25_irr3set2)
-total_F2$volume
-total_F2$loads
 
-# F3: Triple N fertilizer
-total_F3 <- sum_load_objects(F25_irr1set3, F25_irr3set3)
-total_F3$volume
-total_F3$loads
+# C1: 32-0-0 UAN fertilizer
+total_C1 <- sum_load_objects(#F25_irr1C1,
+                             F25_irr2C1,
+                             F25_irr3C1,
+                             F25_irr4C1)
+total_C1$volume
+total_C1$loads
 
-# F4: 32-0-0 UAN fertilizer
-total_F4 <- sum_load_objects(F25_irr1set4, F25_irr3set4)
-total_F4$volume
-total_F4$loads
+# C2: Npower 27-0-0 low vol
+total_C2 <- sum_load_objects(F25_irr2C2,
+                             F25_irr3C2,
+                             F25_irr4C2)
+total_C2$volume
+total_C2$loads
+
 
 # convert to spatial units
-spatial_loads_F1 <- convert_load_to_spatial(total_F1, acreage = 13.2)
-spatial_loads_F2 <- convert_load_to_spatial(total_F2, acreage = 12.9)
-spatial_loads_F3 <- convert_load_to_spatial(total_F3, acreage = 13.1)
-spatial_loads_F4 <- convert_load_to_spatial(total_F4, acreage = 11.6)
+spatial_loads_C1 <- convert_load_to_spatial(total_C1, acreage = 8.2)
+spatial_loads_C2 <- convert_load_to_spatial(total_C2, acreage = 9.9)
+
 
 # View total volume in acre-feet
-spatial_loads_F1$volume_acre_ft
-spatial_loads_F2$volume_acre_ft
-spatial_loads_F3$volume_acre_ft
-spatial_loads_F4$volume_acre_ft
+spatial_loads_C1$volume_acre_ft
+spatial_loads_C2$volume_acre_ft
+
 
 # View converted loads in lbs/acre
-print(spatial_loads_F1$loads)
-print(spatial_loads_F2$loads)
-print(spatial_loads_F3$loads)
-print(spatial_loads_F4$loads)
+print(spatial_loads_C1$loads)
+print(spatial_loads_C2$loads)
+
 

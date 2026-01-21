@@ -108,25 +108,30 @@ import_flow_data <- function(file_path) {
 
 # ============================ PROCESS DATA ============================
 
-process_wq_data <- function(wq_data, treatment_filter) {
+process_wq_data <- function(wq_data, treatment_filter, tz = "America/Denver") {
+  
   wq_data %>%
     mutate(
-      collected = as.POSIXct(parse_date_time(
-        collected, orders = c("mdY HM","mdY","Ymd HMS","Ymd","d b Y HM")
-      ), tz = "America/Denver"),
-      received = as.POSIXct(parse_date_time(
-        received, orders = c("mdY HM","mdY","Ymd HMS","Ymd","d b Y HM")
-      ), tz = "America/Denver"),
-
+      collected = lubridate::parse_date_time(
+        as.character(collected),
+        orders = c("mdY HMS", "mdY HM", "mdY", "Ymd HMS", "Ymd HM", "Ymd", "d b Y HM"),
+        tz = tz
+      ),
+      received = lubridate::parse_date_time(
+        as.character(received),
+        orders = c("mdY HMS", "mdY HM", "mdY", "Ymd HMS", "Ymd HM", "Ymd", "d b Y HM"),
+        tz = tz
+      ),
+      
       treatment.name = as.character(treatment.name),
-
+      
       analyte_abbr = vapply(analyte, function(a) {
         match <- names(analyteAbbr.dict)[sapply(analyteAbbr.dict, function(x) a %in% x)]
         if (length(match) == 0) NA_character_ else match
       }, FUN.VALUE = character(1)),
-
+      
       result = parse_result_to_numeric_nd_as_zero(result),
-
+      
       analyte_abbr = normalize_analyte_abbr(analyte_abbr),
       result = normalize_wq_units_to_mgL(result, analyte_abbr)
     ) %>%
@@ -134,7 +139,7 @@ process_wq_data <- function(wq_data, treatment_filter) {
       if (all(is.na(.$treatment.name))) {
         stop("All values in 'treatment.name' are NA. Verify your dataset.", call. = FALSE)
       } else {
-        filter(., treatment.name == treatment_filter | event.type == treatment_filter)
+        dplyr::filter(., treatment.name == treatment_filter | event.type == treatment_filter)
       }
     } %>%
     {
@@ -145,6 +150,7 @@ process_wq_data <- function(wq_data, treatment_filter) {
       }
     }
 }
+
 
 process_flow_data_flex <- function(flow_data, tz = "America/Denver") {
   num_columns <- ncol(flow_data)
@@ -396,55 +402,114 @@ warn_if_multiple_sampling_events <- function(wq_df, enable = TRUE) {
 }
 
 run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
-                             treatment_filter = "Outflow", user_interval = 4) {
-
+                              treatment_filter = "Outflow", user_interval = 4) {
+  
+  # ============================ IMPORT ============================
+  
   wq_raw   <- import_wq_data(wq_file)
   print(paste0("WQ Data Imported: ", nrow(wq_raw), " rows"))
-
+  
   flow_raw <- import_flow_data_flex(flow_file, tz = "America/Denver")
   print(paste0("Flow Data Imported: ", nrow(flow_raw), " rows"))
-
+  
+  # ============================ PROCESS ============================
+  
   wq   <- process_wq_data(wq_raw, treatment_filter)
   print("WQ Data Processed")
-
+  
   flow <- process_flow_data_flex(flow_raw, tz = "America/Denver")
   print("Flow Data Processed")
-
-  # Accepts either "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" (seconds ok too)
+  
+  # ============================ DATE PARSING ============================
+  
   start_date <- as.POSIXct(trimws(start_date), tz = "America/Denver")
+  end_date   <- as.POSIXct(trimws(end_date),   tz = "America/Denver")
+  
   print(paste0("Start Date: ", start_date))
-  end_date <- as.POSIXct(trimws(end_date), tz = "America/Denver")
-  print(paste0("End Date: ", end_date))
-
-  wq <- filter(wq, collected >= start_date & collected <= end_date)
-  print(paste0("WQ Data Filtered: ", nrow(wq), " rows"))
-  if (nrow(wq) == 0) warning("No WQ data found in the selected time frame. Check your treatment filter and date range.", call. = FALSE)
-  warn_if_multiple_sampling_events(wq, enable = TRUE)
-
-  flow <- filter(flow, datetime >= start_date & datetime <= end_date)
-  print(paste0("Flow Data Filtered: ", nrow(flow), " rows"))
-  if (nrow(flow) == 0) warning("No flow data found in the selected time frame. Check your date range.", call. = FALSE)
-
-  flow_aggregated <- aggregate_flow_data(flow, user_interval = user_interval)
+  print(paste0("End Date:   ", end_date))
+  
+  # ============================ DIAGNOSTIC RANGES ============================
+  
+  wq_range <- range(wq$collected, na.rm = TRUE)
+  flow_range <- range(flow$datetime, na.rm = TRUE)
+  
+  # ============================ FILTER WQ ============================
+  
+  wq_filt <- dplyr::filter(wq, collected >= start_date & collected <= end_date)
+  print(paste0("WQ Data Filtered: ", nrow(wq_filt), " rows"))
+  
+  if (nrow(wq_filt) == 0) {
+    warning(
+      paste0(
+        "No WQ data found in the selected time frame.\n",
+        "Requested window: ", start_date, " to ", end_date, "\n",
+        "WQ datetime range: ",
+        wq_range[1], " to ", wq_range[2], " (America/Denver)"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  warn_if_multiple_sampling_events(wq_filt, enable = TRUE)
+  
+  # ============================ FILTER FLOW ============================
+  
+  flow_filt <- dplyr::filter(flow, datetime >= start_date & datetime <= end_date)
+  print(paste0("Flow Data Filtered: ", nrow(flow_filt), " rows"))
+  
+  if (nrow(flow_filt) == 0) {
+    warning(
+      paste0(
+        "No flow data found in the selected time frame.\n",
+        "Requested window: ", start_date, " to ", end_date, "\n",
+        "Flow datetime range: ",
+        flow_range[1], " to ", flow_range[2], " (America/Denver)"
+      ),
+      call. = FALSE
+    )
+  }
+  
+  # ============================ AGGREGATION ============================
+  
+  flow_aggregated <- aggregate_flow_data(flow_filt, user_interval = user_interval)
   print(paste0("Flow Data Aggregated: ", nrow(flow_aggregated), " rows"))
-
+  
   flow_sum <- sum(flow_aggregated$volume_L, na.rm = TRUE)
-  print(paste0("Total Volume, L: ", flow_sum, " | Gallons: ", flow_sum * 0.264172, " | Acre-ft: ", flow_sum * 8.10714e-7))
-
-  analyte_summary <- compute_analyte_summary(wq)
+  
+  print(
+    paste0(
+      "Total Volume, L: ", flow_sum,
+      " | Gallons: ", flow_sum * 0.264172,
+      " | Acre-ft: ", flow_sum * 8.10714e-7
+    )
+  )
+  
+  # ============================ LOAD CALC ============================
+  
+  analyte_summary <- compute_analyte_summary(wq_filt)
   analyte_summary <- add_total_nitrogen_to_summary(analyte_summary)
-
+  
   all_loads <- compute_all_loads(analyte_summary, flow_aggregated)
-
+  
   print("Excluded non-mass analytes from load calc: EC25, pH")
+  
   if (nrow(all_loads) > 0) {
-    print(paste0("Final analytes in load table: ", paste(all_loads$analyte, collapse = ", ")))
+    print(paste0(
+      "Final analytes in load table: ",
+      paste(all_loads$analyte, collapse = ", ")
+    ))
   } else {
     print("Final analytes in load table: <none>")
   }
-
-  list(volume = flow_sum, loads = all_loads)
+  
+  # ============================ RETURN ============================
+  
+  list(
+    volume = flow_sum,
+    loads  = all_loads
+  )
 }
+
 
 # ============================ SUM OBJECTS FXN ============================
 
