@@ -583,6 +583,7 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
                                             user_interval = NULL,   # NULL = no aggregation, else hours
                                             tz = "America/Denver",
                                             flow_units = c("gpm", "cfs", "L/s"),
+                                            plot_title = NULL,      # NEW: optional custom title
                                             show_flow_sample_events = TRUE,
                                             sample_event_threshold = 0.5,
                                             wq_file = NULL,
@@ -752,8 +753,10 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
     }
   }
   
+  final_title <- if (!is.null(plot_title) && nzchar(trimws(plot_title))) plot_title else "Average flow time series"
+  
   p <- p %>% plotly::layout(
-    title = "Average flow time series",
+    title = final_title,
     xaxis = list(
       title = "Time",
       rangeslider = list(visible = TRUE)
