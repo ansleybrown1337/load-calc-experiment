@@ -402,7 +402,8 @@ warn_if_multiple_sampling_events <- function(wq_df, enable = TRUE) {
 }
 
 run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
-                              treatment_filter = "Outflow", user_interval = 4) {
+                              treatment_filter = "Outflow", user_interval = 4,
+                              volume_override_L = NULL) {   # NEW
   
   # ============================ IMPORT ============================
   
@@ -430,7 +431,7 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
   
   # ============================ DIAGNOSTIC RANGES ============================
   
-  wq_range <- range(wq$collected, na.rm = TRUE)
+  wq_range   <- range(wq$collected,  na.rm = TRUE)
   flow_range <- range(flow$datetime, na.rm = TRUE)
   
   # ============================ FILTER WQ ============================
@@ -443,8 +444,7 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
       paste0(
         "No WQ data found in the selected time frame.\n",
         "Requested window: ", start_date, " to ", end_date, "\n",
-        "WQ datetime range: ",
-        wq_range[1], " to ", wq_range[2], " (America/Denver)"
+        "WQ datetime range: ", wq_range[1], " to ", wq_range[2], " (America/Denver)"
       ),
       call. = FALSE
     )
@@ -462,8 +462,7 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
       paste0(
         "No flow data found in the selected time frame.\n",
         "Requested window: ", start_date, " to ", end_date, "\n",
-        "Flow datetime range: ",
-        flow_range[1], " to ", flow_range[2], " (America/Denver)"
+        "Flow datetime range: ", flow_range[1], " to ", flow_range[2], " (America/Denver)"
       ),
       call. = FALSE
     )
@@ -474,15 +473,60 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
   flow_aggregated <- aggregate_flow_data(flow_filt, user_interval = user_interval)
   print(paste0("Flow Data Aggregated: ", nrow(flow_aggregated), " rows"))
   
-  flow_sum <- sum(flow_aggregated$volume_L, na.rm = TRUE)
+  # --- compute observed volume from flow aggregation ---
+  flow_sum_obs <- sum(flow_aggregated$volume_L, na.rm = TRUE)
   
-  print(
-    paste0(
-      "Total Volume, L: ", flow_sum,
-      " | Gallons: ", flow_sum * 0.264172,
-      " | Acre-ft: ", flow_sum * 8.10714e-7
+  # ============================ OPTIONAL VOLUME OVERRIDE ============================
+  
+  flow_sum_used <- flow_sum_obs
+  override_used <- FALSE
+  
+  if (!is.null(volume_override_L)) {
+    v <- suppressWarnings(as.numeric(volume_override_L))
+    if (!is.finite(v) || v <= 0) {
+      stop("volume_override_L must be a single finite numeric > 0 (liters).", call. = FALSE)
+    }
+    
+    # Replace volume_L in the aggregated data with a scaled version that sums to v
+    denom <- sum(flow_aggregated$volume_L, na.rm = TRUE)
+    
+    if (!is.finite(denom) || denom <= 0) {
+      stop(
+        paste0(
+          "volume_override_L was provided, but the aggregated flow volume is non-finite or <= 0.\n",
+          "This likely means volume_L could not be computed from the flow file in this window."
+        ),
+        call. = FALSE
+      )
+    }
+    
+    flow_aggregated <- flow_aggregated %>%
+      dplyr::mutate(volume_L = volume_L * (v / denom))
+    
+    flow_sum_used <- sum(flow_aggregated$volume_L, na.rm = TRUE)  # should equal v (within FP tolerance)
+    override_used <- TRUE
+  }
+  
+  # ============================ PRINT VOLUME SUMMARY ============================
+  
+  if (override_used) {
+    print(
+      paste0(
+        "Observed Total Volume, L: ", flow_sum_obs,
+        " | Override Volume Used, L: ", flow_sum_used,
+        " | Override Gallons: ", flow_sum_used * 0.264172,
+        " | Override Acre-ft: ", flow_sum_used * 8.10714e-7
+      )
     )
-  )
+  } else {
+    print(
+      paste0(
+        "Total Volume, L: ", flow_sum_used,
+        " | Gallons: ", flow_sum_used * 0.264172,
+        " | Acre-ft: ", flow_sum_used * 8.10714e-7
+      )
+    )
+  }
   
   # ============================ LOAD CALC ============================
   
@@ -491,13 +535,21 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
   
   all_loads <- compute_all_loads(analyte_summary, flow_aggregated)
   
+  bad_bounds <- all_loads %>%
+    dplyr::filter(
+      is.finite(load_upper_kg) & is.finite(load_kg) & load_upper_kg < load_kg |
+        is.finite(load_lower_kg) & is.finite(load_kg) & load_lower_kg > load_kg |
+        is.finite(load_upper_kg) & is.finite(load_lower_kg) & load_upper_kg < load_lower_kg
+    )
+  
+  if (nrow(bad_bounds) > 0) {
+    stop("Invalid load bounds detected (upper < mean and/or lower > mean). Check uncertainty propagation.", call. = FALSE)
+  }
+  
   print("Excluded non-mass analytes from load calc: EC25, pH")
   
   if (nrow(all_loads) > 0) {
-    print(paste0(
-      "Final analytes in load table: ",
-      paste(all_loads$analyte, collapse = ", ")
-    ))
+    print(paste0("Final analytes in load table: ", paste(all_loads$analyte, collapse = ", ")))
   } else {
     print("Final analytes in load table: <none>")
   }
@@ -505,34 +557,40 @@ run_load_analysis <- function(wq_file, flow_file, start_date, end_date,
   # ============================ RETURN ============================
   
   list(
-    volume = flow_sum,
+    volume = flow_sum_used,             # IMPORTANT: return the USED volume
+    volume_observed_L = flow_sum_obs,   # NEW: keep the observed for transparency
+    volume_override_L = if (override_used) as.numeric(volume_override_L) else NA_real_,
     loads  = all_loads
   )
 }
+
 
 
 # ============================ SUM OBJECTS FXN ============================
 
 sum_load_objects <- function(...) {
   load_objects <- list(...)
-  total_volume <- sum(sapply(load_objects, function(obj) obj$volume), na.rm = TRUE)
-
+  total_volume <- sum(vapply(load_objects, function(obj) obj$volume, numeric(1)), na.rm = TRUE)
+  
   original_order <- load_objects[[1]]$loads$analyte
-
-  combined_loads <- bind_rows(lapply(load_objects, function(obj) obj$loads))
-
+  combined_loads <- dplyr::bind_rows(lapply(load_objects, function(obj) obj$loads))
+  
   total_loads <- combined_loads %>%
-    group_by(analyte) %>%
-    summarise(
-      load_kg       = sum(load_kg, na.rm = TRUE),
-      load_upper_kg = sum(load_upper_kg, na.rm = TRUE),
-      load_lower_kg = sum(load_lower_kg, na.rm = TRUE),
+    dplyr::group_by(analyte) %>%
+    dplyr::summarise(
+      load_kg = sum(load_kg, na.rm = TRUE),
+      
+      # If any component upper/lower is NA, keep the total bound as NA
+      load_upper_kg = if (any(!is.finite(load_upper_kg))) NA_real_ else sum(load_upper_kg),
+      load_lower_kg = if (any(!is.finite(load_lower_kg))) NA_real_ else sum(load_lower_kg),
+      
       .groups = "drop"
     ) %>%
-    arrange(factor(analyte, levels = original_order))
-
+    dplyr::arrange(factor(analyte, levels = original_order))
+  
   list(volume = total_volume, loads = total_loads)
 }
+
 
 # ================== CONVERT LOAD TO SPATIAL UNITS ============================
 
@@ -583,7 +641,10 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
                                             user_interval = NULL,   # NULL = no aggregation, else hours
                                             tz = "America/Denver",
                                             flow_units = c("gpm", "cfs", "L/s"),
-                                            plot_title = NULL,      # NEW: optional custom title
+                                            plot_title = NULL,      # optional custom title
+                                            flow_file_2 = NULL,     # NEW: optional 2nd flow dataset
+                                            flow_label_1 = "Flow 1",# NEW: legend label for primary
+                                            flow_label_2 = "Flow 2",# NEW: legend label for secondary
                                             show_flow_sample_events = TRUE,
                                             sample_event_threshold = 0.5,
                                             wq_file = NULL,
@@ -609,24 +670,31 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
   y_title <- switch(flow_units, "gpm" = "Flow (gpm)", "cfs" = "Flow (cfs)", "L/s" = "Flow (L/s)")
   y_fmt   <- switch(flow_units, "gpm" = ".2f", "cfs" = ".3f", "L/s" = ".2f")
   
-  # Guard against accidentally passing a WQ file as flow_file
-  hdr <- tryCatch(read.csv(flow_file, nrows = 1, stringsAsFactors = FALSE), error = function(e) NULL)
-  if (!is.null(hdr)) {
-    nm <- tolower(names(hdr))
-    if (all(c("analyte", "result") %in% nm) || ("treatment.name" %in% nm) || ("event.type" %in% nm)) {
-      stop(
-        paste0(
-          "That file looks like a WATER QUALITY table, not an ISCO flow export: ", flow_file, "\n",
-          "Pass the flow CSV you use as 'flow_file' in run_load_analysis()."
-        ),
-        call. = FALSE
-      )
+  # --- helper: guard against passing WQ as a flow file ---
+  guard_is_flow_file <- function(path) {
+    hdr <- tryCatch(read.csv(path, nrows = 1, stringsAsFactors = FALSE), error = function(e) NULL)
+    if (!is.null(hdr)) {
+      nm <- tolower(names(hdr))
+      if (all(c("analyte", "result") %in% nm) || ("treatment.name" %in% nm) || ("event.type" %in% nm)) {
+        stop(
+          paste0(
+            "That file looks like a WATER QUALITY table, not an ISCO flow export: ", path, "\n",
+            "Pass the flow CSV you use as 'flow_file' in run_load_analysis()."
+          ),
+          call. = FALSE
+        )
+      }
     }
+    invisible(TRUE)
   }
+  
+  guard_is_flow_file(flow_file)
+  if (!is.null(flow_file_2)) guard_is_flow_file(flow_file_2)
   
   if (!is.null(start_date)) start_dt <- as.POSIXct(trimws(start_date), tz = tz) else start_dt <- NULL
   if (!is.null(end_date))   end_dt   <- as.POSIXct(trimws(end_date), tz = tz)   else end_dt   <- NULL
   
+  # -------- primary flow --------
   flow_raw <- import_flow_data_flex(flow_file, tz = tz)
   flow     <- process_flow_data_flex(flow_raw, tz = tz)
   
@@ -646,26 +714,65 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
     x_col <- "time_block"
   }
   
-  # Add plotting y column in desired units (do not overwrite avg_flow_gpm)
   line_df <- line_df %>%
     dplyr::mutate(plot_flow = avg_flow_gpm * conv_factor)
   
-  # Build base plotly (flow line)
+  # Build base plotly (primary line)
   p <- plotly::plot_ly(
     data = line_df,
     x = ~ .data[[x_col]],
     y = ~ plot_flow,
     type = "scatter",
     mode = "lines",
-    name = paste0("avg_flow_", flow_units),
+    name = flow_label_1,
     hovertemplate = paste0(
       "Time: %{x}",
-      "<br>Avg flow (", flow_units, "): %{y:", y_fmt, "}",
+      "<br>", flow_label_1, " (", flow_units, "): %{y:", y_fmt, "}",
       "<extra></extra>"
     )
   )
   
-  # ---- Flow sample_event markers (raw flow only) ----
+  # -------- optional secondary flow line --------
+  if (!is.null(flow_file_2)) {
+    
+    flow2_raw <- import_flow_data_flex(flow_file_2, tz = tz)
+    flow2     <- process_flow_data_flex(flow2_raw, tz = tz)
+    
+    if (!is.null(start_dt)) flow2 <- dplyr::filter(flow2, datetime >= start_dt)
+    if (!is.null(end_dt))   flow2 <- dplyr::filter(flow2, datetime <= end_dt)
+    
+    if (nrow(flow2) == 0) {
+      warning("Second flow file has 0 rows after filtering; skipping overlay line.", call. = FALSE)
+    } else {
+      
+      line_df2 <- flow2
+      x_col2 <- "datetime"
+      if (!is.null(user_interval) && is.finite(user_interval) && user_interval > 0) {
+        line_df2 <- aggregate_flow_data(flow2, user_interval = user_interval)
+        x_col2 <- "time_block"
+      }
+      
+      line_df2 <- line_df2 %>%
+        dplyr::mutate(plot_flow = avg_flow_gpm * conv_factor)
+      
+      p <- p %>% plotly::add_trace(
+        data = line_df2,
+        x = ~ .data[[x_col2]],
+        y = ~ plot_flow,
+        type = "scatter",
+        mode = "lines",
+        name = flow_label_2,
+        hovertemplate = paste0(
+          "Time: %{x}",
+          "<br>", flow_label_2, " (", flow_units, "): %{y:", y_fmt, "}",
+          "<extra></extra>"
+        ),
+        inherit = FALSE
+      )
+    }
+  }
+  
+  # ---- Flow sample_event markers (primary flow only, unchanged functionality) ----
   if (isTRUE(show_flow_sample_events) && ("sample_event" %in% names(flow))) {
     
     ev <- dplyr::filter(flow, is.finite(sample_event) & sample_event >= sample_event_threshold)
@@ -771,3 +878,128 @@ plot_avg_flow_timeseries_plotly <- function(flow_file,
   attr(flow, "flow_units") <- flow_units
   invisible(flow)
 }
+
+# ============================ SIGNIFICANCE HELPER FXN ============================
+make_c1_c2_comparison_table <- function(c1_loads,
+                                        c2_loads,
+                                        c1_label = "C1: 32 UAN",
+                                        c2_label = "C2: Npower",
+                                        # columns present in spatial_loads_* $loads
+                                        kg_col = "load_kg",
+                                        lbs_acre_col = "lbs_acre",
+                                        lower_col = "lower_lbs_acre",
+                                        upper_col = "upper_lbs_acre",
+                                        kg_to_lbs = 2.20462,
+                                        analyte_map = c(
+                                          "TN"    = "Total_N",
+                                          "TP"    = "Total_P",
+                                          "NO2_N" = "NO2-N",
+                                          "NO3_N" = "NO3-N",
+                                          "PO4_P" = "PO4-P"
+                                        ),
+                                        digits_lbs = 2,
+                                        digits_lbs_ac = 3,
+                                        include_all_analytes = TRUE,
+                                        return_pretty_text = TRUE) {
+  
+  # ---- checks ----
+  req <- c("analyte", kg_col, lbs_acre_col, lower_col, upper_col)
+  if (!all(req %in% names(c1_loads))) stop("c1_loads missing required columns: ", paste(setdiff(req, names(c1_loads)), collapse = ", "), call. = FALSE)
+  if (!all(req %in% names(c2_loads))) stop("c2_loads missing required columns: ", paste(setdiff(req, names(c2_loads)), collapse = ", "), call. = FALSE)
+  
+  # ---- helper: label analytes ----
+  label_analyte <- function(x) {
+    x <- as.character(x)
+    idx <- match(x, names(analyte_map))
+    ifelse(!is.na(idx), unname(analyte_map[idx]), x)
+  }
+  
+  # ---- helper: significance from bounds (lbs/acre) ----
+  sig_from_bounds <- function(c1_lower, c1_upper, c2_lower, c2_upper) {
+    dplyr::case_when(
+      !is.finite(c1_lower) | !is.finite(c1_upper) | !is.finite(c2_lower) | !is.finite(c2_upper) ~ "NS",
+      c1_lower > c2_upper ~ "C1>C2",
+      c2_lower > c1_upper ~ "C2>C1",
+      TRUE ~ "NS"
+    )
+  }
+  
+  # ---- pull needed cols + compute lbs from kg ----
+  c1 <- c1_loads %>%
+    dplyr::transmute(
+      analyte,
+      analyte_label = label_analyte(analyte),
+      c1_lbs        = .data[[kg_col]] * kg_to_lbs,
+      c1_lbs_ac     = .data[[lbs_acre_col]],
+      c1_lower_ac   = .data[[lower_col]],
+      c1_upper_ac   = .data[[upper_col]]
+    )
+  
+  c2 <- c2_loads %>%
+    dplyr::transmute(
+      analyte,
+      analyte_label = label_analyte(analyte),
+      c2_lbs        = .data[[kg_col]] * kg_to_lbs,
+      c2_lbs_ac     = .data[[lbs_acre_col]],
+      c2_lower_ac   = .data[[lower_col]],
+      c2_upper_ac   = .data[[upper_col]]
+    )
+  
+  # ---- merge ----
+  joined <- if (isTRUE(include_all_analytes)) {
+    dplyr::full_join(c1, c2, by = c("analyte", "analyte_label"))
+  } else {
+    dplyr::inner_join(c1, c2, by = c("analyte", "analyte_label"))
+  }
+  
+  out <- joined %>%
+    dplyr::mutate(
+      Significance = sig_from_bounds(c1_lower_ac, c1_upper_ac, c2_lower_ac, c2_upper_ac)
+    ) %>%
+    dplyr::select(
+      Analyte = analyte_label,
+      c1_lbs, c1_lbs_ac,
+      c2_lbs, c2_lbs_ac,
+      Significance
+    )
+  
+  # ---- nice column names ----
+  colnames(out) <- c(
+    "Analyte",
+    paste0(c1_label, " Lbs"),
+    paste0(c1_label, " Lbs/Ac"),
+    paste0(c2_label, " Lbs"),
+    paste0(c2_label, " Lbs/Ac"),
+    "Significance"
+  )
+  
+  # ---- optional Excel-friendly printout (tab-delimited) ----
+  if (isTRUE(return_pretty_text)) {
+    
+    fmt_num <- function(x, digits, big_mark = ",") {
+      ifelse(is.na(x), "",
+             formatC(x, format = "f", digits = digits, big.mark = big_mark))
+    }
+    
+    out_print <- out %>%
+      dplyr::mutate(
+        !!paste0(c1_label, " Lbs")    := fmt_num(.data[[paste0(c1_label, " Lbs")]],    digits_lbs),
+        !!paste0(c1_label, " Lbs/Ac") := fmt_num(.data[[paste0(c1_label, " Lbs/Ac")]], digits_lbs_ac),
+        !!paste0(c2_label, " Lbs")    := fmt_num(.data[[paste0(c2_label, " Lbs")]],    digits_lbs),
+        !!paste0(c2_label, " Lbs/Ac") := fmt_num(.data[[paste0(c2_label, " Lbs/Ac")]], digits_lbs_ac)
+      )
+    
+    txt <- paste(
+      paste(colnames(out_print), collapse = "\t"),
+      paste(apply(out_print, 1, function(r) paste(r, collapse = "\t")), collapse = "\n"),
+      sep = "\n"
+    )
+    cat(txt, "\n")
+  }
+  
+  out
+}
+
+
+
+

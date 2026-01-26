@@ -1,189 +1,236 @@
-# Load Calculation Experiment
+# load-calc-experiment
 
-## Purpose
+A lightweight but robust R toolkit for calculating irrigation-event and seasonal water-quality loads by combining ISCO-style flow data with discrete grab or composite water-quality samples. The package is designed for real field datasets where logging intervals vary, analytes differ by unit, volumes may be missing, and paired-plot comparisons are required.
 
-This script calculates water analyte loads based on **water quality (WQ)** and **flow** data, while also documenting important assumptions and limitations. It aggregates flow, maps analyte names to standardized abbreviations, and estimates uncertainty in loads using **standard deviations**. You can choose the treatment location (e.g., `Outflow`, `Inflow`) and set the flow aggregation interval.
-
-## Author
-
-**A.J. Brown**
-*Agricultural Data Scientist, CSU Agricultural Water Quality Program*
-
-## Features
-
-* **Automated processing** of WQ and flow CSVs.
-* **Custom treatment selection** via `treatment_filter`.
-* **Analyte name mapping** to standardized abbreviations.
-* **Flow aggregation** to user-defined intervals (e.g., 4-hour blocks).
-* **Load calculation** (kg) with upper/lower bounds using ±1 SD (lower bound clamped at 0).
-* **Clear status messages** during processing (import counts, date filtering, excluded analytes, etc.).
-* **Simple outputs**: a list containing total volume (L) and a tidy analyte load table.
-
-### What’s new (backend improvements)
-
-* **EC25 & pH automatically excluded** from load results (with a status line).
-* **Non-detects (ND and `<MDL`) treated as zeros** (commented as such in the code).
-* **Prototype flow-weighted mean concentration (FWMC)** utilities included but **not active** (no behavior change unless you opt-in later).
-* **Safer math**: volume sums use `na.rm=TRUE`; negative lower bounds clamped to 0; guards for zero/NA flow.
+This repository grew out of edge-of-field irrigation studies (e.g., Fruita C, Upper Yampa, Gunnison, Molina) and is intended to be transparent, auditable, and easy to adapt to new sites.
 
 ---
 
-## Installation & Dependencies
+## Key Capabilities
 
-Requires **R** and these libraries:
+- Robust import of ISCO flow exports with variable headers and column counts
+- Flexible datetime parsing with explicit time-zone handling
+- Optional aggregation of flow to user-defined time steps
+- Automatic volume estimation from average flow when volume is missing
+- Water-quality preprocessing with:
+  - analyte name normalization
+  - non-detect handling
+  - Fe and Se unit normalization (µg/L → mg/L)
+- Event-based and seasonal load calculations
+- Derived analytes (e.g., Total N = TKN + NO3-N + NO2-N)
+- Explicit uncertainty bounds based on concentration standard deviation
+- Summation of multiple irrigation events
+- Conversion of loads to spatial units (lb/ac, kg/ha)
+- Interactive Plotly diagnostics:
+  - flow time series with bottle/sample markers
+  - overlaid flow comparisons (C1 vs C2)
+  - C1 vs C2 scatterplots on overlapping timesteps
+- Automated C1 vs C2 comparison tables with non-overlap significance logic
 
-```r
-install.packages(c("dplyr", "tidyr", "lubridate"))
+---
+
+## Repository Structure
+
+```
+load-calc-experiment/
+│
+├── code/
+│   ├── load_exp.R              # Core functions
+│   ├── fruita_C_2025.R         # Example paired-plot analysis
+│   ├── upper-yampa-2022-2024.R # Multi-year watershed example
+│   └── site-specific scripts
+│
+├── data/                        # Public example datasets
+│
+├── private-data/                # Ignored raw field data
+│
+├── figs/                        # Example outputs
+│
+├── README.md
+├── LICENSE
+└── .gitignore
 ```
 
+`load_exp.R` is the only file required to use the toolkit. All other scripts are worked examples.
+
 ---
 
-## Usage
+## Installation and Setup
 
-### 1) Import the functions
-
-Save the script as `load_exp.R` and source it:
+Clone the repository and open the R project:
 
 ```r
 source("./code/load_exp.R")
 ```
 
-### 2) Run a load calculation
+Required packages:
+
+- dplyr
+- tidyr
+- lubridate
+- plotly
+
+All dependencies are loaded internally with informative error messages if missing.
+
+---
+
+## Core Workflow
+
+### 1. Run a Load Analysis for a Single Event
 
 ```r
-load_results <- run_load_analysis(
+res <- run_load_analysis(
   wq_file = "./data/2022uym_wq.csv",
   flow_file = "./data/2022uym_flow.csv",
   start_date = "2022-06-12",
-  end_date = "2022-07-08",
-  treatment_filter = "Outflow",  # or "Inflow", etc.
-  user_interval = 4              # aggregation in hours
+  end_date   = "2022-07-08",
+  treatment_filter = "Outflow",
+  user_interval = 4
+)
+
+res$volume   # total volume (L)
+res$loads    # analyte loads (kg)
+```
+
+### 2. Combine Multiple Events
+
+```r
+total <- sum_load_objects(event1, event2, event3)
+```
+
+Volumes and analyte loads are summed explicitly. No implicit averaging occurs.
+
+### 3. Convert to Spatial Units
+
+```r
+spatial <- convert_load_to_spatial(total, acreage = 8.2)
+
+spatial$volume_acre_ft
+spatial$loads
+```
+
+Outputs include lb/ac and kg/ha with upper and lower bounds.
+
+---
+
+## Paired-Plot and Treatment Comparisons
+
+### Flow Diagnostics
+
+Overlay two flow datasets in time:
+
+```r
+plot_avg_flow_timeseries_plotly(
+  flow_file   = flowpath_C1,
+  flow_file_2 = flowpath_C2,
+  flow_units  = "cfs",
+  flow_label_1 = "C1 (32-0-0 UAN)",
+  flow_label_2 = "C2 (NPower 27-0-0)",
+  plot_title  = "Fruita C: C1 vs C2 Flow"
 )
 ```
 
-### 3) Access results
-
-* **Total outflow volume (L)**
+### Flow Relationship on Overlapping Timesteps
 
 ```r
-load_results$volume
+merged <- plot_c1_c2_flow_relationship_plotly(
+  flow_file_C1 = flowpath_C1,
+  flow_file_C2 = flowpath_C2,
+  user_interval = 1,
+  flow_units = "cfs"
+)
 ```
 
-* **Analyte load table (kg)**
+This function:
+- aligns datasets by datetime
+- drops non-overlapping timesteps
+- removes non-positive flows
+- optionally adds 1:1 and linear fit lines
+
+---
+
+## C1 vs C2 Load Comparison Tables
 
 ```r
-load_results$loads
-# Columns: analyte, load_kg, load_upper_kg, load_lower_kg
+final_tbl <- make_c1_c2_comparison_table(
+  c1_loads = spatial_loads_C1$loads,
+  c2_loads = spatial_loads_C2$loads,
+  c1_label = "C1: 32 UAN",
+  c2_label = "C2: Npower"
+)
 ```
 
-* **Access a specific analyte’s row**, e.g., NO3\_N:
+The resulting table includes:
 
-```r
-subset(load_results$loads, analyte == "NO3_N")
-# or dplyr:
-# dplyr::filter(load_results$loads, analyte == "NO3_N")
-```
+- total loads (lbs)
+- spatial loads (lbs/ac)
+- a qualitative significance flag
 
-> Note: **EC25** and **pH** are always excluded from `load_results$loads` (status message is printed during the run).
+### Significance Logic
+
+Significance is determined **only** from uncertainty bounds:
+
+- `C1 > C2` if lower(C1) > upper(C2)
+- `C2 > C1` if lower(C2) > upper(C1)
+- `NS` otherwise
+
+Point estimates are *not* used for significance decisions.
 
 ---
 
-## Units
+## Mathematical and Data Assumptions
 
-* **Flow/Volume**
-  Input volume (gallons) → converted to **liters (L)** using `1 gal = 3.78541 L`.
-  Total and aggregated volumes are reported in **liters (L)**.
+1. **Concentration averaging**
+   - All WQ samples within a window are averaged
+   - Multiple sampling days trigger a warning but are allowed
 
-* **Concentrations**
-  Expected to be **mg/L** (see WQ data format below).
+2. **Non-detects**
+   - Treated as zero by design (`<MDL → 0`)
 
-* **Loads**
-  Computed as `mg/L × L = mg`, then converted to **kg** by dividing by **1e6**.
+3. **Uncertainty**
+   - Bounds reflect ±1 SD of concentration only
+   - If SD cannot be estimated (n < 2), bounds are NA
 
-* **Uncertainty bounds**
-  `load_upper_kg` and `load_lower_kg` use ±1 SD around the mean concentration; lower bound is clamped to 0.
+4. **Volumes**
+   - Prefer measured volume from ISCO exports
+   - Otherwise estimated from avg_flow × timestep
+   - Optional volume override enables paired-plot normalization
 
----
+5. **Fe and Se units**
+   - Assumed reported in µg/L
+   - Converted internally to mg/L before load calculation
 
-## Data Format Requirements
+6. **Derived analytes**
+   - Total N = TKN + NO3-N + NO2-N
+   - Uncertainty propagated via quadrature when available
 
-### Water Quality CSV
-
-**Expected structure (headers on row 1):**
-
-* `location.name`
-* `treatment.name` (e.g., Outflow, Inflow, CT, MT, ST, W1, …)
-* `event.type` (e.g., "Inflow", "Outflow", "Point Sample")
-* `sample.id` (AWQP sample ID)
-* `lab.id.x` (ALS Lab ID)
-* `method` (e.g., "SM 4500-NH3", "SM 4500-NO3")
-* `cas.number`
-* `analyte` (e.g., "NITRATE AS N", "SELENIUM")
-* `result` (**numeric concentration in mg/L**; see ND rules below)
-* `units` (e.g., "MG/L", "UG/L")
-* `collected` (MM/DD/YYYY HH\:MM)
-* `received` (MM/DD/YYYY HH\:MM)
-
-**ND / Censored values:**
-
-* **By design, NDs are treated as zeros.**
-* Strings like `"ND"`, `"nd"`, `"non-detect"`, `"n/d"`, and values like `"<0.01"` are parsed to **0**.
-* If your lab provides MDLs separately and you prefer half-MDL or other rules, you can adjust the helper in `process_wq_data()`.
-
-### Flow CSV
-
-**Expected structure (headers start on row 7 in the source file; the code assigns names):**
-
-* `datetime` (MM/DD/YYYY HH\:MM)
-* `min_flow_gpm`
-* `min_time` (HH\:MM\:SS AM/PM)
-* `max_flow_gpm`
-* `max_time` (HH\:MM\:SS AM/PM)
-* `avg_flow_gpm`
-* `volume_gal`
-* `sample_event` (1 = Yes, NA = No)
-
-> The script converts `volume_gal` → `volume_L` and aggregates by your specified `user_interval` (hours).
+7. **Time zones**
+   - All datetimes parsed and stored in America/Denver by default
 
 ---
 
-## Example Session Output (abridged)
+## Intended Use
 
-During a run you’ll see messages like:
+This tool is designed for:
 
-```
-WQ Data Imported: 108 rows
-Flow Data Imported: 39613 rows
-WQ Data Processed
-Flow Data Processed
-Start Date: 2023-05-03 00:00:00 UTC
-End Date: 2023-08-03 00:00:00 UTC
-WQ Data Filtered: 24 rows
-Flow Data Filtered: 10562 rows
-Flow Data Aggregated: 552 rows
-Total Volume, L: 1.11e+07 | Gallons: 2.94e+06
-Note: The following analytes were excluded from load calculations because they are not mass-based: EC25, pH
-Excluded non-mass analytes from load calc: EC25, pH
-Final analytes in load table: NO2_N, NO3_N, PO4_P, TP, TDS, TKN, TSS, Se (g not kg), Fe (g not kg)
-```
+- edge-of-field irrigation studies
+- paired treatment comparisons
+- expert-witness and audit-ready analyses
+- exploratory diagnostics prior to formal modeling
 
----
-
-## Prototype: Flow-Weighted Mean Concentrations (FWMC)
-
-The code includes **prototype** helpers to compute flow-weighted concentrations by aligning WQ timestamps to aggregated flow `time_block`s within a tolerance window.
-**These functions are not active** in `run_load_analysis()` to avoid changing your current results.
-To pilot later:
-
-1. `wq_aligned <- align_wq_to_flow_prototype(wq, flow_aggregated)`
-2. `analyte_summary <- compute_analyte_summary_fwmc_prototype(wq_aligned, flow_aggregated)`
+It is **not** a replacement for regulatory load estimation frameworks, but rather a transparent research-grade calculation engine.
 
 ---
 
 ## License
 
-This project is licensed under the **GNU GPL v2**.
+MIT License. Use freely with attribution.
 
-## Contact
+---
 
-For questions, improvements, or collaborations, contact **A.J. Brown** – CSU Agricultural Water Quality Program.
+## Author
+
+Ansley J. Brown
+
+Agricultural Water Quality Program
+Colorado State University

@@ -19,6 +19,16 @@ plot_avg_flow_timeseries_plotly(flowpath_C2,
                                 flow_units = 'cfs',
                                 plot_title = "Fruita C2 Flow Timeseries")
 
+# C1 vs C2 comparison (overlay)
+plot_avg_flow_timeseries_plotly(
+  flow_file   = flowpath_C1,
+  flow_file_2 = flowpath_C2,
+  flow_units  = "cfs",
+  flow_label_1 = "C1 (32-0-0 UAN)",
+  flow_label_2 = "C2 (NPower 27-0-0)",
+  plot_title  = "Fruita C: C1 vs C2 Flow Timeseries"
+)
+
 # ----- Irrigations - C1 -----
 # Set 3 of each irrigation was the plot before the treatment and used here
 # for comparison against C2
@@ -92,7 +102,8 @@ F25_irr2C2 <- run_load_analysis(
   start_date = "2025-05-05 00:00",
   end_date = "2025-05-07 00:00",
   treatment_filter = "C2",  # User can now specify treatment!
-  user_interval = 1
+  user_interval = 1,
+  volume_override_L = F25_irr2C1$volume  # use C1 volume for C2 load calc
 )
 
 # Irrigation 3
@@ -102,7 +113,8 @@ F25_irr3C2 <- run_load_analysis(
   start_date = "2025-05-17 12:00",
   end_date = "2025-05-18 20:00",
   treatment_filter = "C2",  # User can now specify treatment!
-  user_interval = 1
+  user_interval = 1,
+  volume_override_L = F25_irr3C1$volume  # use C1 volume for C2 load calc
 )
 
 # Irrigation 4
@@ -112,7 +124,8 @@ F25_irr4C2 <- run_load_analysis(
   start_date = "2025-05-29 10:00",
   end_date = "2025-05-30 20:00",
   treatment_filter = "C2",  # User can now specify treatment!
-  user_interval = 1
+  user_interval = 1,
+  volume_override_L = F25_irr4C1$volume  # use C1 volume for C2 load calc
 )
 
 # Irrigation 5 sampled but not processed due to C1 power issues
@@ -181,13 +194,25 @@ spatial_loads_C2 <- convert_load_to_spatial(total_C2, acreage = 9.9)
 spatial_loads_C1$volume_acre_ft
 spatial_loads_C2$volume_acre_ft
 
+# sig diff fxn for comparing between load objects
+final_tbl <- make_c1_c2_comparison_table(
+  c1_loads = spatial_loads_C1$loads,
+  c2_loads = spatial_loads_C2$loads,
+  c1_label = "C1: 32 UAN",
+  c2_label = "C2: Npower"
+)
+
+# final_tbl is a tibble you can also write to CSV if you want:
+# write.csv(final_tbl, "c1_c2_load_comparison.csv", row.names = FALSE)
+
+
 
 # View converted loads in lbs/acre
 print(spatial_loads_C1$loads)
 print(spatial_loads_C2$loads)
 
 
-# c1 v c2 plotter
+# ------ c1 v c2 plotter -------
 plot_c1_c2_flow_relationship_plotly <- function(flow_file_C1,
                                                 flow_file_C2,
                                                 start_date = NULL,
